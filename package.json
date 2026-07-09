@@ -1,0 +1,22 @@
+{
+  "name": "etsy-shopify-sync",
+  "version": "1.0.0",
+  "description": "Continuously syncs paid Etsy orders into Shopify as orders, decrementing Shopify inventory to keep both channels in sync.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json && node dist/index.js",
+    "dry-run": "tsc -p tsconfig.json && node dist/cli/dry-run.js"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
