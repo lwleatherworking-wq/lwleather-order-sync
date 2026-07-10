@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { getEnv, getEtsyRedirectUri } from "./config/env.js";
 import { saveDiscoveredShopId, getShopId } from "./config/shopId.js";
 import {
@@ -102,6 +104,36 @@ function handleHealth(res: ServerResponse): void {
   });
 }
 
+// TEMPORARY: diagnose why the SQLite DB isn't surviving redeploys. Remove once resolved.
+function handleDebugFs(res: ServerResponse): void {
+  const { DB_PATH } = getEnv();
+  const resolvedDbPath = resolve(DB_PATH);
+  const dir = dirname(resolvedDbPath);
+
+  let dirListing: Array<{ name: string; sizeBytes: number; mtime: string }> | string;
+  try {
+    dirListing = readdirSync(dir).map((name) => {
+      const s = statSync(resolve(dir, name));
+      return { name, sizeBytes: s.size, mtime: s.mtime.toISOString() };
+    });
+  } catch (error) {
+    dirListing = `Could not read directory: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  sendJson(res, 200, {
+    DB_PATH_env: DB_PATH,
+    resolvedDbPath,
+    dbDir: dir,
+    dbDirExists: existsSync(dir),
+    dbFileExists: existsSync(resolvedDbPath),
+    dbDirListing: dirListing,
+    ETSY_SHOP_ID_env_is_set: Boolean(process.env.ETSY_SHOP_ID),
+    RAILWAY_VOLUME_MOUNT_PATH: process.env.RAILWAY_VOLUME_MOUNT_PATH ?? null,
+    RAILWAY_VOLUME_NAME: process.env.RAILWAY_VOLUME_NAME ?? null,
+    processCwd: process.cwd(),
+  });
+}
+
 export function startServer(): void {
   const { PORT } = getEnv();
 
@@ -113,6 +145,7 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
+        if (url.pathname === "/debug/fs") return handleDebugFs(res);
         if (url.pathname === "/") {
           return sendHtml(
             res,
