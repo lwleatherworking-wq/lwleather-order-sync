@@ -74,6 +74,10 @@ export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[],
       variantId: line.variant.variantId,
       sku: line.variant.sku,
       quantity: line.quantity,
+      // Etsy orders here are all physical goods needing a shipping label. Left unset,
+      // this defaults to false rather than inheriting the variant's own setting, which
+      // silently auto-closes the fulfillment order and blocks buying a shipping label.
+      requiresShipping: true,
       priceSet: {
         shopMoney: { amount: line.unitPrice, currencyCode },
       },
