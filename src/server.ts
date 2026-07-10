@@ -140,44 +140,93 @@ function formatTimestamp(ms: number | undefined): string {
 }
 
 const SHARED_STYLE = `
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    :root {
+      --bg: #ffffff; --fg: #1a1a1a; --muted-fg: #666; --border: #eee;
+      --code-bg: #f2f2f2; --input-bg: #ffffff; --input-border: #ccc;
+      --button-bg: #1a1a1a; --button-fg: #ffffff;
+      --badge-ok-bg: #d1f7dd; --badge-ok-fg: #12603a;
+      --badge-bad-bg: #fde2e2; --badge-bad-fg: #8a1f1f;
+      --dropdown-shadow: rgba(0,0,0,0.08); --mark-bg: #fff3b0;
+    }
+    [data-theme="dark"] {
+      --bg: #15171a; --fg: #e8e8e8; --muted-fg: #9aa0a6; --border: #2c2f34;
+      --code-bg: #22252b; --input-bg: #1c1f24; --input-border: #3a3d44;
+      --button-bg: #e8e8e8; --button-fg: #15171a;
+      --badge-ok-bg: #123a24; --badge-ok-fg: #7fe3a4;
+      --badge-bad-bg: #3d1717; --badge-bad-fg: #ff9d9d;
+      --dropdown-shadow: rgba(0,0,0,0.5); --mark-bg: #6b5a17;
+    }
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
     h1 { font-size: 1.4rem; }
     h2 { font-size: 1.05rem; margin-top: 2rem; }
-    nav.in-page { margin-bottom: 1.5rem; }
+    nav.in-page { margin-bottom: 1.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    nav.in-page .spacer { flex: 1; }
+    #theme-toggle {
+      margin-top: 0; padding: 0.25rem 0.6rem; border: 1px solid var(--input-border); border-radius: 6px;
+      background: var(--bg); color: var(--fg); font-size: 0.9rem; cursor: pointer;
+    }
     .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
-    .badge.ok { background: #d1f7dd; color: #12603a; }
-    .badge.bad { background: #fde2e2; color: #8a1f1f; }
+    .badge.ok { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
+    .badge.bad { background: var(--badge-bad-bg); color: var(--badge-bad-fg); }
     table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.9rem; }
-    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
     dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; }
-    dt { color: #666; }
-    footer { margin-top: 2rem; font-size: 0.8rem; color: #888; }
+    dt { color: var(--muted-fg); }
+    footer { margin-top: 2rem; font-size: 0.8rem; color: var(--muted-fg); }
     .banner { padding: 0.6rem 0.8rem; border-radius: 6px; }
-    .banner.success { background: #d1f7dd; color: #12603a; }
-    .banner.error { background: #fde2e2; color: #8a1f1f; }
+    .banner.success { background: var(--badge-ok-bg); color: var(--badge-ok-fg); }
+    .banner.error { background: var(--badge-bad-bg); color: var(--badge-bad-fg); }
     .field { margin-bottom: 1rem; }
     label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-    input[type="text"], input[type="password"], input[type="number"], input[type="date"] {
-      width: 100%; padding: 0.4rem 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;
+    input[type="text"], input[type="password"], input[type="number"], input[type="date"], textarea, select {
+      width: 100%; padding: 0.4rem 0.5rem; box-sizing: border-box; border: 1px solid var(--input-border);
+      border-radius: 4px; background: var(--input-bg); color: var(--fg);
     }
-    .hint { color: #666; font-size: 0.8rem; margin: 0.2rem 0 0; }
-    button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: #1a1a1a; color: white; font-size: 0.95rem; cursor: pointer; }
+    .hint { color: var(--muted-fg); font-size: 0.8rem; margin: 0.2rem 0 0; }
+    button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: var(--button-bg); color: var(--button-fg); font-size: 0.95rem; cursor: pointer; }
     .inline-form { display: flex; gap: 0.4rem; align-items: center; }
     .inline-form input[type="text"] { width: auto; flex: 1; }
     .inline-form button { margin-top: 0; }
-    code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 3px; }
     .combobox { position: relative; }
     .combobox-results {
       display: none; position: absolute; z-index: 10; top: 100%; left: 0; right: 0;
-      background: white; border: 1px solid #ccc; border-top: none; border-radius: 0 0 6px 6px;
-      max-height: 240px; overflow-y: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+      background: var(--bg); border: 1px solid var(--input-border); border-top: none; border-radius: 0 0 6px 6px;
+      max-height: 240px; overflow-y: auto; box-shadow: 0 4px 10px var(--dropdown-shadow);
     }
     .combobox-results.open { display: block; }
     .combobox-result { padding: 0.45rem 0.6rem; cursor: pointer; font-size: 0.9rem; }
-    .combobox-result:hover { background: #f2f2f2; }
-    .combobox-result.combobox-empty { color: #888; cursor: default; }
+    .combobox-result:hover { background: var(--code-bg); }
+    .combobox-result.combobox-empty { color: var(--muted-fg); cursor: default; }
     .combobox-result.combobox-empty:hover { background: none; }
-    .combobox-result mark { background: #fff3b0; color: inherit; padding: 0; border-radius: 2px; }
+    .combobox-result mark { background: var(--mark-bg); color: inherit; padding: 0; border-radius: 2px; }
+`;
+
+// Runs before first paint so the page never flashes the wrong theme: an explicit
+// localStorage choice wins, otherwise the OS-level prefers-color-scheme is used.
+const THEME_INIT_SCRIPT = `
+  (function () {
+    var saved = localStorage.getItem("theme");
+    var theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+`;
+
+const THEME_TOGGLE_SCRIPT = `
+  (function () {
+    var btn = document.getElementById("theme-toggle");
+    if (!btn) return;
+    function label() {
+      return document.documentElement.getAttribute("data-theme") === "dark" ? "☀️ Light" : "\u{1F319} Dark";
+    }
+    btn.textContent = label();
+    btn.addEventListener("click", function () {
+      var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("theme", next);
+      btn.textContent = label();
+    });
+  })();
 `;
 
 /**
@@ -204,6 +253,7 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
   <meta charset="utf-8">
   ${params.refreshSeconds ? `<meta http-equiv="refresh" content="${params.refreshSeconds}">` : ""}
   <title>${escapeHtml(params.title)}</title>
+  <script>${THEME_INIT_SCRIPT}</script>
   ${appBridgeTag}
   <style>${SHARED_STYLE}</style>
 </head>
@@ -215,8 +265,13 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
     <s-link href="/list-to-etsy">List to Etsy</s-link>
     <s-link href="/setup">Setup</s-link>
   </s-app-nav>
-  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/setup">Setup</a></nav>
+  <nav class="in-page">
+    <a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/setup">Setup</a>
+    <span class="spacer"></span>
+    <button type="button" id="theme-toggle"></button>
+  </nav>
   ${params.bodyHtml}
+  <script>${THEME_TOGGLE_SCRIPT}</script>
 </body>
 </html>`;
 
@@ -709,7 +764,7 @@ async function listToEtsyProductPageHtml(params: {
     </div>
     <div class="field">
       <label>Description</label>
-      <textarea name="description" rows="8" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;border:1px solid #ccc;border-radius:4px;" required>${escapeHtml(stripHtml(product.descriptionHtml))}</textarea>
+      <textarea name="description" rows="8" required>${escapeHtml(stripHtml(product.descriptionHtml))}</textarea>
     </div>
     <div class="field">
       <label>Price (GBP)</label>
