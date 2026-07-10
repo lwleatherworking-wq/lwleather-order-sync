@@ -1,6 +1,4 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import { getEnv, getEtsyRedirectUri } from "./config/env.js";
 import { saveDiscoveredShopId, getShopId } from "./config/shopId.js";
 import {
@@ -11,10 +9,8 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
-import { getReceiptById } from "./etsy/receipts.js";
-import { getFlaggedReceipts, markSynced } from "./db/receiptStore.js";
+import { getFlaggedReceipts } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
-import { getPrimaryLocationId } from "./shopify/locations.js";
 import { logger } from "./logger.js";
 
 // Short-lived, in-memory only: a PKCE verifier only needs to survive the few seconds
@@ -106,71 +102,6 @@ function handleHealth(res: ServerResponse): void {
   });
 }
 
-// TEMPORARY, ONE-OFF: mark the 3 legitimate orders created before the read_locations
-// scope fix as already-synced, so re-enabling real syncing doesn't recreate them as
-// duplicates. Remove once run once.
-const KNOWN_GOOD_PAIRS = [
-  { etsyReceiptId: "4092098661", shopifyOrderId: "gid://shopify/Order/7887060304209" },
-  { etsyReceiptId: "4099330116", shopifyOrderId: "gid://shopify/Order/7887060730193" },
-  { etsyReceiptId: "4111842377", shopifyOrderId: "gid://shopify/Order/7887061320017" },
-];
-
-async function handleFixReceipts(res: ServerResponse): Promise<void> {
-  const shopId = getShopId();
-  const results: unknown[] = [];
-  for (const pair of KNOWN_GOOD_PAIRS) {
-    const receipt = await getReceiptById(shopId, pair.etsyReceiptId);
-    markSynced({
-      etsyReceiptId: pair.etsyReceiptId,
-      shopifyOrderId: pair.shopifyOrderId,
-      receiptCreatedTs: receipt.created_timestamp,
-    });
-    results.push({ ...pair, receiptCreatedTs: receipt.created_timestamp });
-  }
-  sendJson(res, 200, { fixed: results });
-}
-
-// TEMPORARY: diagnose why the SQLite DB isn't surviving redeploys. Remove once resolved.
-function handleDebugFs(res: ServerResponse): void {
-  const { DB_PATH } = getEnv();
-  const resolvedDbPath = resolve(DB_PATH);
-  const dir = dirname(resolvedDbPath);
-
-  let dirListing: Array<{ name: string; sizeBytes: number; mtime: string }> | string;
-  try {
-    dirListing = readdirSync(dir).map((name) => {
-      const s = statSync(resolve(dir, name));
-      return { name, sizeBytes: s.size, mtime: s.mtime.toISOString() };
-    });
-  } catch (error) {
-    dirListing = `Could not read directory: ${error instanceof Error ? error.message : String(error)}`;
-  }
-
-  sendJson(res, 200, {
-    DB_PATH_env: DB_PATH,
-    resolvedDbPath,
-    dbDir: dir,
-    dbDirExists: existsSync(dir),
-    dbFileExists: existsSync(resolvedDbPath),
-    dbDirListing: dirListing,
-    ETSY_SHOP_ID_env_is_set: Boolean(process.env.ETSY_SHOP_ID),
-    RAILWAY_VOLUME_MOUNT_PATH: process.env.RAILWAY_VOLUME_MOUNT_PATH ?? null,
-    RAILWAY_VOLUME_NAME: process.env.RAILWAY_VOLUME_NAME ?? null,
-    processCwd: process.cwd(),
-  });
-}
-
-// TEMPORARY: safely verify the read_locations scope fix without going through order
-// creation. Remove once confirmed working.
-async function handleDebugLocation(res: ServerResponse): Promise<void> {
-  try {
-    const locationId = await getPrimaryLocationId();
-    sendJson(res, 200, { ok: true, locationId });
-  } catch (error) {
-    sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
 export function startServer(): void {
   const { PORT } = getEnv();
 
@@ -182,9 +113,6 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
-        if (url.pathname === "/debug/fs") return handleDebugFs(res);
-        if (url.pathname === "/debug/location") return handleDebugLocation(res);
-        if (url.pathname === "/debug/fix-receipts") return handleFixReceipts(res);
         if (url.pathname === "/") {
           return sendHtml(
             res,
