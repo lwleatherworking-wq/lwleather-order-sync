@@ -469,6 +469,12 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
     .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.listingTitle)}</td></tr>`)
     .join("");
 
+  // Etsy SKUs that are already an identical string to a Shopify SKU sync automatically
+  // without needing a manual link — this just records that link explicitly, so it shows
+  // up in "Existing links" as confirmed rather than left implicit.
+  const shopifySkuSet = new Set(shopifySkus.map((s) => s.sku));
+  const exactMatchCandidates = etsySkus.filter((s) => shopifySkuSet.has(s.sku) && !linkedSet.has(s.sku));
+
   const shopifySkuOptionsHtml = shopifySkus
     .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.displayName)}</option>`)
     .join("");
@@ -494,6 +500,19 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
           ${needsLinkingRows}
         </table>`
       : `<p>Nothing currently blocked on a SKU mismatch.</p>`
+  }
+
+  <h2>Auto-link exact SKU matches</h2>
+  ${
+    exactMatchCandidates.length > 0
+      ? `<p>${exactMatchCandidates.length} Etsy SKU(s) are an identical string to a Shopify SKU but aren't
+          recorded as a link yet. These already sync automatically without a manual link — this just records
+          them explicitly so they show up under "Existing links" below.</p>
+        <form method="POST" action="/sku-linking">
+          <input type="hidden" name="action" value="auto_link_exact">
+          <button type="submit">Auto-link ${exactMatchCandidates.length} exact match(es)</button>
+        </form>`
+      : `<p>No unlinked exact SKU matches found.</p>`
   }
 
   <h2>Add a link</h2>
@@ -565,6 +584,34 @@ async function handleSkuLinkingPost(req: IncomingMessage, res: ServerResponse): 
   const body = await readRequestBody(req);
   const params = new URLSearchParams(body);
   const action = params.get("action");
+
+  if (action === "auto_link_exact") {
+    const shopifySkuSet = new Set((await listShopifySkus()).map((s) => s.sku));
+    let etsySkus: Awaited<ReturnType<typeof listEtsySkus>>;
+    try {
+      etsySkus = await listEtsySkus(getShopId());
+    } catch (error) {
+      const { html, headers } = await skuLinkingPageHtml({
+        message: error instanceof Error ? error.message : "Could not load Etsy SKUs.",
+        messageIsError: true,
+      });
+      sendHtml(res, 200, html, headers);
+      return;
+    }
+    const linkedSet = new Set(listSkuLinks().map((l) => l.etsySku));
+    const matches = etsySkus.filter((s) => shopifySkuSet.has(s.sku) && !linkedSet.has(s.sku));
+    for (const match of matches) {
+      setSkuLink(match.sku, match.sku);
+    }
+    logger.info("Auto-linked exact SKU matches via /sku-linking", { count: matches.length });
+    const { html, headers } = await skuLinkingPageHtml({
+      message:
+        matches.length > 0 ? `Auto-linked ${matches.length} exact SKU match(es).` : "No new exact SKU matches to link.",
+    });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
   const etsySku = params.get("etsySku")?.trim();
 
   if (!etsySku) {
