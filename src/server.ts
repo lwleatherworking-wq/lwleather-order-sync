@@ -475,10 +475,16 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
   const shopifySkuSet = new Set(shopifySkus.map((s) => s.sku));
   const exactMatchCandidates = etsySkus.filter((s) => shopifySkuSet.has(s.sku) && !linkedSet.has(s.sku));
 
+  // Already-linked SKUs are dropped from the search suggestions on both sides — nothing
+  // to gain from re-linking one that's already linked. They reappear the moment the link
+  // is removed, since this is recomputed fresh from the current sku_links state every render.
+  const linkedShopifySkuSet = new Set(links.map((l) => l.shopifySku));
   const shopifySkuOptionsHtml = shopifySkus
+    .filter((s) => !linkedShopifySkuSet.has(s.sku))
     .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.displayName)}</option>`)
     .join("");
   const etsySkuOptionsHtml = etsySkus
+    .filter((s) => !linkedSet.has(s.sku))
     .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.listingTitle)}</option>`)
     .join("");
   const skuDatalistsHtml = `
