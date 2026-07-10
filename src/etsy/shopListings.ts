@@ -20,6 +20,34 @@ export async function getShippingProfiles(shopId: string): Promise<ShippingProfi
     .map((p) => ({ shippingProfileId: p.shipping_profile_id, title: p.title }));
 }
 
+export interface ReadinessStateDefinition {
+  readinessStateDefinitionId: number;
+  label: string;
+}
+
+interface ShopReadinessStateDefinitionsResponse {
+  results: Array<{
+    readiness_state_id: number;
+    readiness_state: "ready_to_ship" | "made_to_order";
+    min_processing_days: number;
+    max_processing_days: number;
+    processing_days_display_label: string;
+  }>;
+}
+
+/** Etsy calls these "processing profiles" in its UI; required on every physical listing offering. */
+export async function getReadinessStateDefinitions(shopId: string): Promise<ReadinessStateDefinition[]> {
+  const res = await etsyFetch(`/application/shops/${shopId}/readiness-state-definitions?limit=100`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Etsy processing profiles (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as ShopReadinessStateDefinitionsResponse;
+  return data.results.map((p) => ({
+    readinessStateDefinitionId: p.readiness_state_id,
+    label: `${p.readiness_state === "ready_to_ship" ? "Ready to ship" : "Made to order"} — ${p.processing_days_display_label}`,
+  }));
+}
+
 export interface TaxonomyOption {
   id: number;
   fullPath: string;
@@ -74,6 +102,7 @@ export interface DraftListingInput {
   taxonomyId: number;
   isSupply: boolean;
   shippingProfileId?: number;
+  readinessStateId: number;
 }
 
 interface CreateListingResponse {
@@ -91,6 +120,7 @@ export async function createDraftListing(shopId: string, input: DraftListingInpu
     when_made: input.whenMade,
     taxonomy_id: String(input.taxonomyId),
     is_supply: String(input.isSupply),
+    readiness_state_id: String(input.readinessStateId),
   });
   if (input.shippingProfileId) {
     body.set("shipping_profile_id", String(input.shippingProfileId));

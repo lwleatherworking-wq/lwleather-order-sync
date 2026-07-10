@@ -20,6 +20,7 @@ import { listProducts, getProductDetail } from "./shopify/products.js";
 import {
   getShippingProfiles,
   getSellerTaxonomyOptions,
+  getReadinessStateDefinitions,
   createDraftListing,
   type DraftListingInput,
 } from "./etsy/shopListings.js";
@@ -636,10 +637,15 @@ async function listToEtsyProductPageHtml(params: {
 
   let shippingProfiles: Awaited<ReturnType<typeof getShippingProfiles>> = [];
   let taxonomyOptions: Awaited<ReturnType<typeof getSellerTaxonomyOptions>> = [];
+  let readinessStates: Awaited<ReturnType<typeof getReadinessStateDefinitions>> = [];
   let loadError: string | undefined;
   try {
     const shopId = getShopId();
-    [shippingProfiles, taxonomyOptions] = await Promise.all([getShippingProfiles(shopId), getSellerTaxonomyOptions()]);
+    [shippingProfiles, taxonomyOptions, readinessStates] = await Promise.all([
+      getShippingProfiles(shopId),
+      getSellerTaxonomyOptions(),
+      getReadinessStateDefinitions(shopId),
+    ]);
   } catch (error) {
     loadError =
       error instanceof Error
@@ -663,6 +669,9 @@ async function listToEtsyProductPageHtml(params: {
 
   const shippingOptionsHtml = shippingProfiles
     .map((sp) => `<option value="${sp.shippingProfileId}">${escapeHtml(sp.title)}</option>`)
+    .join("");
+  const readinessOptionsHtml = readinessStates
+    .map((r) => `<option value="${r.readinessStateDefinitionId}">${escapeHtml(r.label)}</option>`)
     .join("");
   const taxonomyOptionsHtml = taxonomyOptions
     .map((t) => `<option value="${t.id}">${escapeHtml(t.fullPath)}</option>`)
@@ -712,6 +721,14 @@ async function listToEtsyProductPageHtml(params: {
       }
     </div>
     <div class="field">
+      <label>Processing profile</label>
+      ${
+        readinessStates.length > 0
+          ? `<select name="readinessStateId" required>${readinessOptionsHtml}</select>`
+          : `<p class="banner error">No processing profiles found on your Etsy shop, and this app can't create one for you (would need an extra Etsy permission). In Etsy, start creating any listing by hand far enough to set a processing time, save it as a draft, then come back here and re-load this page.</p>`
+      }
+    </div>
+    <div class="field">
       <label>Who made it</label>
       <select name="whoMade">${whoMadeOptionsHtml}</select>
     </div>
@@ -756,6 +773,7 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   const whoMade = params.get("whoMade") as DraftListingInput["whoMade"] | null;
   const whenMade = params.get("whenMade");
   const shippingProfileIdRaw = params.get("shippingProfileId");
+  const readinessStateId = Number(params.get("readinessStateId"));
   const isSupply = params.has("isSupply");
 
   if (
@@ -767,7 +785,9 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
     quantity <= 0 ||
     !Number.isFinite(taxonomyId) ||
     !whoMade ||
-    !whenMade
+    !whenMade ||
+    !Number.isFinite(readinessStateId) ||
+    readinessStateId <= 0
   ) {
     const { html, headers, status } = await listToEtsyProductPageHtml({
       productId,
@@ -790,6 +810,7 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
       taxonomyId,
       isSupply,
       shippingProfileId: shippingProfileIdRaw ? Number(shippingProfileIdRaw) : undefined,
+      readinessStateId,
     });
 
     // Recorded immediately after the listing is created — matches the same lesson learned
