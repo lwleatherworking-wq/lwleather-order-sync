@@ -15,6 +15,14 @@ import { clearCachedShopifyToken } from "./shopify/apiClient.js";
 import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
+import { getEtsyListingLink, recordEtsyListingLink } from "./db/etsyListingLinkStore.js";
+import { listProducts, getProductDetail } from "./shopify/products.js";
+import {
+  getShippingProfiles,
+  getSellerTaxonomyOptions,
+  createDraftListing,
+  type DraftListingInput,
+} from "./etsy/shopListings.js";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
 
@@ -189,9 +197,10 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
     <s-link href="/" rel="home">Status</s-link>
     <s-link href="/log">Log</s-link>
     <s-link href="/sku-linking">SKU Linking</s-link>
+    <s-link href="/list-to-etsy">List to Etsy</s-link>
     <s-link href="/setup">Setup</s-link>
   </s-app-nav>
-  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/setup">Setup</a></nav>
+  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/setup">Setup</a></nav>
   ${params.bodyHtml}
 </body>
 </html>`;
@@ -515,6 +524,293 @@ async function handleSkuLinkingPost(req: IncomingMessage, res: ServerResponse): 
   sendHtml(res, 200, html, headers);
 }
 
+/** Strips HTML tags to produce a readable plain-text default for the Etsy description field. */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<\/(p|div|h[1-6]|li|br|tr)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const WHEN_MADE_OPTIONS = [
+  "made_to_order",
+  "2020_2026",
+  "2010_2019",
+  "2007_2009",
+  "before_2007",
+  "2000_2006",
+  "1990s",
+  "1980s",
+  "1970s",
+  "1960s",
+  "1950s",
+  "1940s",
+  "1930s",
+  "1920s",
+  "1910s",
+  "1900s",
+  "1800s",
+  "1700s",
+  "before_1700",
+];
+
+const WHO_MADE_OPTIONS: Array<{ value: DraftListingInput["whoMade"]; label: string }> = [
+  { value: "i_did", label: "I did" },
+  { value: "someone_else", label: "Someone else" },
+  { value: "collective", label: "A member of my shop" },
+];
+
+async function listToEtsyPageHtml(): Promise<{ html: string; headers?: Record<string, string> }> {
+  let products: Awaited<ReturnType<typeof listProducts>> = [];
+  let loadError: string | undefined;
+  try {
+    products = await listProducts();
+  } catch (error) {
+    loadError = error instanceof Error ? error.message : "Failed to load Shopify products.";
+  }
+
+  const rows = products
+    .map((p) => {
+      const linkedListingId = getEtsyListingLink(p.id);
+      const statusCell = linkedListingId
+        ? `<a href="https://www.etsy.com/your/shops/me/tools/listings/${escapeHtml(linkedListingId)}" target="_blank" rel="noopener">Etsy draft #${escapeHtml(linkedListingId)}</a>`
+        : `<a href="/list-to-etsy/product?id=${encodeURIComponent(p.id)}">List to Etsy</a>`;
+      return `<tr>
+        <td>${p.imageUrl ? `<img src="${escapeHtml(p.imageUrl)}" alt="" width="48" height="48" style="object-fit:cover;border-radius:4px;">` : ""}</td>
+        <td>${escapeHtml(p.title)}</td>
+        <td>${escapeHtml(p.sku ?? "—")}</td>
+        <td>${escapeHtml(p.price)}</td>
+        <td>${statusCell}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const bodyHtml = `
+  <h1>List products to Etsy</h1>
+  <p>Creates a <strong>draft</strong> listing on Etsy from a Shopify product — nothing is
+  published live. Etsy fields Shopify doesn't have (category, shipping profile, who/when
+  made) are filled in per-product on the next screen before anything is created.</p>
+
+  ${loadError ? `<p class="banner error">${escapeHtml(loadError)}</p>` : ""}
+
+  ${
+    products.length > 0
+      ? `<table>
+          <tr><th></th><th>Product</th><th>SKU</th><th>Price</th><th></th></tr>
+          ${rows}
+        </table>`
+      : !loadError
+        ? `<p>No Shopify products found.</p>`
+        : ""
+  }`;
+
+  return renderPage({ title: "List products to Etsy", bodyHtml });
+}
+
+function handleListToEtsyGet(res: ServerResponse): Promise<void> {
+  return listToEtsyPageHtml().then(({ html, headers }) => sendHtml(res, 200, html, headers));
+}
+
+async function listToEtsyProductPageHtml(params: {
+  productId: string;
+  message?: string;
+  messageIsError?: boolean;
+}): Promise<{ html: string; headers?: Record<string, string>; status: number }> {
+  const product = await getProductDetail(params.productId);
+  if (!product) {
+    return {
+      ...renderPage({ title: "Product not found", bodyHtml: `<h1>Product not found</h1><p><a href="/list-to-etsy">Back to product list</a></p>` }),
+      status: 404,
+    };
+  }
+
+  const alreadyLinked = getEtsyListingLink(product.id);
+  const banner = params.message
+    ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
+    : "";
+
+  let shippingProfiles: Awaited<ReturnType<typeof getShippingProfiles>> = [];
+  let taxonomyOptions: Awaited<ReturnType<typeof getSellerTaxonomyOptions>> = [];
+  let loadError: string | undefined;
+  try {
+    const shopId = getShopId();
+    [shippingProfiles, taxonomyOptions] = await Promise.all([getShippingProfiles(shopId), getSellerTaxonomyOptions()]);
+  } catch (error) {
+    loadError =
+      error instanceof Error
+        ? error.message
+        : "Could not load Etsy shipping profiles / categories. Make sure Etsy is connected (re-authorize via /oauth/etsy/start if listings_w was just added).";
+  }
+
+  const alreadyLinkedBanner = alreadyLinked
+    ? `<p class="banner success">Already listed as Etsy draft #${escapeHtml(alreadyLinked)}. Submitting again will create a <strong>separate</strong> new draft listing.</p>`
+    : "";
+
+  if (loadError) {
+    return {
+      ...renderPage({
+        title: `List "${product.title}" to Etsy`,
+        bodyHtml: `<h1>List "${escapeHtml(product.title)}" to Etsy</h1>${banner}<p class="banner error">${escapeHtml(loadError)}</p><p><a href="/list-to-etsy">Back to product list</a></p>`,
+      }),
+      status: 200,
+    };
+  }
+
+  const shippingOptionsHtml = shippingProfiles
+    .map((sp) => `<option value="${sp.shippingProfileId}">${escapeHtml(sp.title)}</option>`)
+    .join("");
+  const taxonomyOptionsHtml = taxonomyOptions
+    .map((t) => `<option value="${t.id}">${escapeHtml(t.fullPath)}</option>`)
+    .join("");
+  const whenMadeOptionsHtml = WHEN_MADE_OPTIONS.map((v) => `<option value="${v}">${v.replace(/_/g, "-")}</option>`).join(
+    ""
+  );
+  const whoMadeOptionsHtml = WHO_MADE_OPTIONS.map((w) => `<option value="${w.value}">${escapeHtml(w.label)}</option>`).join(
+    ""
+  );
+
+  const bodyHtml = `
+  <h1>List "${escapeHtml(product.title)}" to Etsy</h1>
+  ${banner}
+  ${alreadyLinkedBanner}
+
+  <form method="POST" action="/list-to-etsy/product?id=${encodeURIComponent(product.id)}">
+    <div class="field">
+      <label>Title</label>
+      <input type="text" name="title" value="${escapeHtml(product.title)}" required>
+    </div>
+    <div class="field">
+      <label>Description</label>
+      <textarea name="description" rows="8" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;border:1px solid #ccc;border-radius:4px;" required>${escapeHtml(stripHtml(product.descriptionHtml))}</textarea>
+    </div>
+    <div class="field">
+      <label>Price (GBP)</label>
+      <input type="number" name="price" step="0.01" min="0.01" value="${escapeHtml(product.price)}" required>
+    </div>
+    <div class="field">
+      <label>Quantity</label>
+      <input type="number" name="quantity" step="1" min="1" value="${product.totalInventory > 0 ? product.totalInventory : 1}" required>
+    </div>
+    <div class="field">
+      <label>Category (Etsy taxonomy)</label>
+      <select name="taxonomyId" required>
+        <option value="">Select a category…</option>
+        ${taxonomyOptionsHtml}
+      </select>
+    </div>
+    <div class="field">
+      <label>Shipping profile</label>
+      ${
+        shippingProfiles.length > 0
+          ? `<select name="shippingProfileId">${shippingOptionsHtml}</select>`
+          : `<p class="hint">No Etsy shipping profiles found — create one in Etsy first, or leave the listing without one and set it later.</p>`
+      }
+    </div>
+    <div class="field">
+      <label>Who made it</label>
+      <select name="whoMade">${whoMadeOptionsHtml}</select>
+    </div>
+    <div class="field">
+      <label>When was it made</label>
+      <select name="whenMade">${whenMadeOptionsHtml}</select>
+    </div>
+    <div class="field">
+      <label><input type="checkbox" name="isSupply"> This is a craft supply, not a finished product</label>
+    </div>
+    <button type="submit">Create Etsy draft listing</button>
+  </form>
+  <p><a href="/list-to-etsy">Back to product list</a></p>`;
+
+  return { ...renderPage({ title: `List "${product.title}" to Etsy`, bodyHtml }), status: 200 };
+}
+
+function handleListToEtsyProductGet(url: URL, res: ServerResponse): Promise<void> {
+  const productId = url.searchParams.get("id");
+  if (!productId) {
+    sendHtml(res, 400, "<h1>Missing product id</h1>");
+    return Promise.resolve();
+  }
+  return listToEtsyProductPageHtml({ productId }).then(({ html, headers, status }) => sendHtml(res, status, html, headers));
+}
+
+async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const productId = url.searchParams.get("id");
+  if (!productId) {
+    sendHtml(res, 400, "<h1>Missing product id</h1>");
+    return;
+  }
+
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+
+  const title = params.get("title")?.trim();
+  const description = params.get("description")?.trim();
+  const price = Number(params.get("price"));
+  const quantity = Number(params.get("quantity"));
+  const taxonomyId = Number(params.get("taxonomyId"));
+  const whoMade = params.get("whoMade") as DraftListingInput["whoMade"] | null;
+  const whenMade = params.get("whenMade");
+  const shippingProfileIdRaw = params.get("shippingProfileId");
+  const isSupply = params.has("isSupply");
+
+  if (
+    !title ||
+    !description ||
+    !Number.isFinite(price) ||
+    price <= 0 ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    !Number.isFinite(taxonomyId) ||
+    !whoMade ||
+    !whenMade
+  ) {
+    const { html, headers, status } = await listToEtsyProductPageHtml({
+      productId,
+      message: "Please fill in all required fields with valid values.",
+      messageIsError: true,
+    });
+    sendHtml(res, status, html, headers);
+    return;
+  }
+
+  try {
+    const shopId = getShopId();
+    const { listingId } = await createDraftListing(shopId, {
+      title,
+      description,
+      price,
+      quantity,
+      whoMade,
+      whenMade,
+      taxonomyId,
+      isSupply,
+      shippingProfileId: shippingProfileIdRaw ? Number(shippingProfileIdRaw) : undefined,
+    });
+
+    // Recorded immediately after the listing is created — matches the same lesson learned
+    // from the order sync's duplicate-prevention fix: never defer the "this happened" record
+    // past a later step, or a retry after a later failure can create a second draft listing.
+    recordEtsyListingLink(productId, String(listingId));
+    logger.info("Created Etsy draft listing from Shopify product", { productId, listingId });
+
+    const { html, headers, status } = await listToEtsyProductPageHtml({
+      productId,
+      message: `Draft listing #${listingId} created on Etsy. Add photos and review it there before publishing.`,
+    });
+    sendHtml(res, status, html, headers);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to create Etsy draft listing.";
+    logger.error("Failed to create Etsy draft listing", { productId, error: message });
+    const { html, headers, status } = await listToEtsyProductPageHtml({ productId, message, messageIsError: true });
+    sendHtml(res, status, html, headers);
+  }
+}
+
 interface SetupField {
   key: OverridableKey;
   label: string;
@@ -668,6 +964,9 @@ export function startServer(): void {
         if (url.pathname === "/setup") return handleSetupGet(res);
         if (url.pathname === "/sku-linking" && req.method === "POST") return handleSkuLinkingPost(req, res);
         if (url.pathname === "/sku-linking") return handleSkuLinkingGet(res);
+        if (url.pathname === "/list-to-etsy/product" && req.method === "POST") return handleListToEtsyProductPost(url, req, res);
+        if (url.pathname === "/list-to-etsy/product") return handleListToEtsyProductGet(url, res);
+        if (url.pathname === "/list-to-etsy") return handleListToEtsyGet(res);
         if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");

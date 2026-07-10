@@ -42,3 +42,12 @@ CREATE TABLE IF NOT EXISTS sku_links (
   shopify_sku TEXT NOT NULL,
   created_at INTEGER NOT NULL -- unix ms
 );
+
+-- Tracks Shopify products already listed to Etsy via /list-to-etsy, so the picker
+-- can hide (or flag) ones already sent, and so a retry can't create a duplicate
+-- draft listing for the same product.
+CREATE TABLE IF NOT EXISTS etsy_listing_links (
+  shopify_product_id TEXT PRIMARY KEY,
+  etsy_listing_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL -- unix ms
+);

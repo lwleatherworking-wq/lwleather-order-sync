@@ -6,9 +6,10 @@ const AUTHORIZE_URL = "https://www.etsy.com/oauth/connect";
 const TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token";
 
 // Etsy requires transactions_r to read shop receipts, shops_r so the setup flow can
-// call GET /v3/application/users/me to discover the shop id, and listings_r to read
-// listing inventory (for the Etsy SKU reference list on /sku-linking).
-const SCOPES = "transactions_r shops_r listings_r";
+// call GET /v3/application/users/me to discover the shop id, listings_r to read
+// listing inventory (for the Etsy SKU reference list on /sku-linking), and listings_w
+// to create draft listings from Shopify products (/list-to-etsy).
+const SCOPES = "transactions_r shops_r listings_r listings_w";
 
 function base64url(input: Buffer): string {
   return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

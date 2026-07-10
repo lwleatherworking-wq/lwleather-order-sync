@@ -111,6 +111,17 @@ orders going forward, not import your whole order history. To pull in older orde
   a Shopify variant and every SKU set on an active Etsy listing, as a reference when
   typing one into the forms. The Etsy list requires the `listings_r` OAuth scope — if
   you connected Etsy before this was added, re-authorize once via `/oauth/etsy/start`.
+- **`/list-to-etsy`** — pick one Shopify product at a time and create a matching
+  **draft** listing on Etsy (never published live automatically). Title, description,
+  price, and quantity are pre-filled from the Shopify product and editable; category,
+  shipping profile, "who/when made", and "craft supply" are Etsy-only fields you fill
+  in on the form since Shopify has no equivalent. Requires the `listings_w` OAuth
+  scope — if you connected Etsy before this was added, re-authorize once via
+  `/oauth/etsy/start`. Product images are **not** uploaded automatically; add them on
+  Etsy when you finish editing the draft. Each product tracks which Etsy draft it was
+  sent to, so the picker shows "already listed" instead of a link once one exists —
+  submitting again from that product's form still creates a **separate** new draft
+  (there's no update-in-place).
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.
