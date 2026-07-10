@@ -105,7 +105,6 @@ export async function syncOnce(): Promise<SyncRunSummary> {
           inventoryItemId: line.variant.inventoryItemId,
           quantity: line.quantity,
           shopifyOrderId: result.orderId,
-          etsyReceiptId: String(receipt.receipt_id),
         });
       }
 

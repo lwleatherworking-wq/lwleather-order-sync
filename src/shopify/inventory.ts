@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { shopifyGraphql } from "./apiClient.js";
 import { getPrimaryLocationId } from "./locations.js";
 
@@ -33,7 +32,6 @@ export async function decrementInventory(params: {
   inventoryItemId: string;
   quantity: number;
   shopifyOrderId: string;
-  etsyReceiptId: string;
 }): Promise<void> {
   const locationId = await getPrimaryLocationId();
 
@@ -50,7 +48,9 @@ export async function decrementInventory(params: {
           locationId,
           // changeFromQuantity intentionally omitted: we don't track live on-hand counts
           // ourselves, so we don't try to compare-and-swap against a stale local value.
-          ledgerDocumentUri: `gid://etsy-shopify-sync/Receipt/${params.etsyReceiptId}`,
+          // ledgerDocumentUri is deliberately omitted too: Shopify rejects it outright
+          // for name: "available" ("not allowed when adjusting available") — only
+          // referenceDocumentUri is valid here.
         },
       ],
     },
@@ -61,9 +61,4 @@ export async function decrementInventory(params: {
       `inventoryAdjustQuantities userErrors: ${JSON.stringify(data.inventoryAdjustQuantities.userErrors)}`
     );
   }
-}
-
-/** Deterministic idempotency helper (not currently required by this mutation, kept for future use/logging). */
-export function inventoryAdjustmentKey(etsyReceiptId: string, inventoryItemId: string): string {
-  return createHash("sha256").update(`${etsyReceiptId}:${inventoryItemId}`).digest("hex");
 }

@@ -143,7 +143,6 @@ async function handleResyncReceipt(url: URL, res: ServerResponse): Promise<void>
       inventoryItemId: line.variant.inventoryItemId,
       quantity: line.quantity,
       shopifyOrderId: result.orderId,
-      etsyReceiptId: receiptId,
     });
   }
 
