@@ -22,7 +22,20 @@ export function getDb(): DatabaseSync {
   const { DB_PATH } = getEnv();
   mkdirSync(dirname(DB_PATH), { recursive: true });
   db = new DatabaseSync(DB_PATH);
-  db.exec("PRAGMA journal_mode = WAL;");
+  // Deliberately NOT using WAL mode: WAL defers durable writes to a separate journal
+  // file until a checkpoint runs, and a container getting SIGKILLed mid-deploy before
+  // that checkpoint can silently lose the most recent writes (this caused duplicate
+  // Shopify orders once already). The default rollback-journal mode commits directly
+  // into the main file, which matters more here than WAL's concurrent-reader benefit
+  // — this is a single process with no concurrent readers to speed up.
   runMigrations(db);
+
+  const closeAndExit = () => {
+    db?.close();
+    process.exit(0);
+  };
+  process.on("SIGTERM", closeAndExit);
+  process.on("SIGINT", closeAndExit);
+
   return db;
 }
