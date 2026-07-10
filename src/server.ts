@@ -9,8 +9,7 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
-import { getReceiptById } from "./etsy/receipts.js";
-import { getFlaggedReceipts, markSynced } from "./db/receiptStore.js";
+import { getFlaggedReceipts } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
 
@@ -103,25 +102,6 @@ function handleHealth(res: ServerResponse): void {
   });
 }
 
-// TEMPORARY, ONE-OFF: mark a specific receipt as synced against an already-existing
-// order (created/fixed manually), bypassing the date-range checkpoint since it's
-// already moved past this receipt's original date. Used for receipt 4111842377 /
-// order #1190, after manually recreating it and correcting inventory by hand
-// following the requiresShipping and ledgerDocumentUri bugs. Remove once run once.
-async function handleMarkSynced(url: URL, res: ServerResponse): Promise<void> {
-  const receiptId = url.searchParams.get("id");
-  const orderId = url.searchParams.get("orderId");
-  if (!receiptId || !orderId) {
-    sendJson(res, 400, { error: "missing ?id=<etsy receipt id>&orderId=<shopify order gid>" });
-    return;
-  }
-
-  const shopId = getShopId();
-  const receipt = await getReceiptById(shopId, receiptId);
-  markSynced({ etsyReceiptId: receiptId, shopifyOrderId: orderId, receiptCreatedTs: receipt.created_timestamp });
-  sendJson(res, 200, { ok: true, etsyReceiptId: receiptId, shopifyOrderId: orderId });
-}
-
 export function startServer(): void {
   const { PORT } = getEnv();
 
@@ -133,7 +113,6 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
-        if (url.pathname === "/debug/mark-synced") return handleMarkSynced(url, res);
         if (url.pathname === "/") {
           return sendHtml(
             res,
