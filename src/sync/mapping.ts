@@ -1,6 +1,7 @@
 import type { EtsyReceipt } from "../etsy/types.js";
 import { moneyToDecimalString } from "../etsy/types.js";
 import { findVariantBySku } from "../shopify/variantLookup.js";
+import { getSkuLink } from "../db/skuLinkStore.js";
 import type { ResolvedLineItem } from "../shopify/orders.js";
 
 export interface UnresolvedLine {
@@ -27,7 +28,10 @@ export async function resolveLineItems(receipt: EtsyReceipt): Promise<ResolvedLi
       unresolved.push({ transactionId: txn.transaction_id, sku: null, reason: "missing_sku" });
       continue;
     }
-    const variant = await findVariantBySku(txn.sku);
+    // A manual override from /sku-linking takes precedence over the exact-match lookup,
+    // for cases where the Etsy and Shopify SKUs were never going to match as-is.
+    const linkedSku = getSkuLink(txn.sku);
+    const variant = await findVariantBySku(linkedSku ?? txn.sku);
     if (!variant) {
       unresolved.push({ transactionId: txn.transaction_id, sku: txn.sku, reason: "sku_not_found" });
       continue;

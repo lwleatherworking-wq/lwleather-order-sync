@@ -33,3 +33,12 @@ CREATE TABLE IF NOT EXISTS checkpoint (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Manual overrides for Etsy SKU -> Shopify SKU, checked before the exact-match variant
+-- lookup fails a receipt. Lets a mismatch be fixed from /sku-linking without needing to
+-- edit the SKU on either the Etsy listing or the Shopify product itself.
+CREATE TABLE IF NOT EXISTS sku_links (
+  etsy_sku TEXT PRIMARY KEY,
+  shopify_sku TEXT NOT NULL,
+  created_at INTEGER NOT NULL -- unix ms
+);

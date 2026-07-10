@@ -11,7 +11,9 @@ import {
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
 import { clearCachedShopifyToken } from "./shopify/apiClient.js";
+import { findVariantBySku } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
+import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
 
@@ -148,6 +150,10 @@ const SHARED_STYLE = `
     }
     .hint { color: #666; font-size: 0.8rem; margin: 0.2rem 0 0; }
     button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: #1a1a1a; color: white; font-size: 0.95rem; cursor: pointer; }
+    .inline-form { display: flex; gap: 0.4rem; align-items: center; }
+    .inline-form input[type="text"] { width: auto; flex: 1; }
+    .inline-form button { margin-top: 0; }
+    code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
 `;
 
 /**
@@ -181,9 +187,10 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
   <s-app-nav>
     <s-link href="/" rel="home">Status</s-link>
     <s-link href="/log">Log</s-link>
+    <s-link href="/sku-linking">SKU Linking</s-link>
     <s-link href="/setup">Setup</s-link>
   </s-app-nav>
-  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/setup">Setup</a></nav>
+  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/setup">Setup</a></nav>
   ${params.bodyHtml}
 </body>
 </html>`;
@@ -296,6 +303,162 @@ function handleLogPage(res: ServerResponse): void {
   }`;
 
   const { html, headers } = renderPage({ title: "Etsy → Shopify sync log", bodyHtml });
+  sendHtml(res, 200, html, headers);
+}
+
+/** Distinct Etsy SKUs currently blocking a receipt from syncing (reason: sku_not_found). */
+function getUnmatchedSkus(): string[] {
+  const skus = new Set<string>();
+  for (const flagged of getFlaggedReceipts()) {
+    if (flagged.reason !== "unmatched_sku" || !flagged.errorDetail) continue;
+    try {
+      const unresolved = JSON.parse(flagged.errorDetail) as Array<{ sku: string | null; reason: string }>;
+      for (const line of unresolved) {
+        if (line.sku && line.reason === "sku_not_found") skus.add(line.sku);
+      }
+    } catch {
+      // ignore malformed detail rather than break the page
+    }
+  }
+  return Array.from(skus);
+}
+
+function skuLinkingPageHtml(params: { message?: string; messageIsError?: boolean }): { html: string; headers?: Record<string, string> } {
+  const unmatched = getUnmatchedSkus();
+  const links = listSkuLinks();
+  const linkedSet = new Set(links.map((l) => l.etsySku));
+
+  const banner = params.message
+    ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
+    : "";
+
+  const needsLinkingRows = unmatched
+    .map((sku) => {
+      if (linkedSet.has(sku)) {
+        return `<tr><td>${escapeHtml(sku)}</td><td colspan="2">Linked to <code>${escapeHtml(
+          getSkuLink(sku) ?? ""
+        )}</code> — will retry on the next sync</td></tr>`;
+      }
+      return `<tr>
+        <td>${escapeHtml(sku)}</td>
+        <td colspan="2">
+          <form method="POST" action="/sku-linking" class="inline-form">
+            <input type="hidden" name="action" value="link">
+            <input type="hidden" name="etsySku" value="${escapeHtml(sku)}">
+            <input type="text" name="shopifySku" placeholder="Shopify SKU to link to" required>
+            <button type="submit">Link</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const existingLinksRows = links
+    .map(
+      (l) => `<tr>
+        <td>${escapeHtml(l.etsySku)}</td>
+        <td>${escapeHtml(l.shopifySku)}</td>
+        <td>
+          <form method="POST" action="/sku-linking" class="inline-form">
+            <input type="hidden" name="action" value="unlink">
+            <input type="hidden" name="etsySku" value="${escapeHtml(l.etsySku)}">
+            <button type="submit">Remove</button>
+          </form>
+        </td>
+      </tr>`
+    )
+    .join("");
+
+  const bodyHtml = `
+  <h1>SKU linking</h1>
+  <p>Manually map an Etsy listing SKU to a Shopify variant SKU, for cases where they were
+  never going to match exactly. A link takes effect on the next sync tick.</p>
+
+  ${banner}
+
+  <h2>Needs linking (${unmatched.length})</h2>
+  ${
+    unmatched.length > 0
+      ? `<table>
+          <tr><th>Etsy SKU</th><th colspan="2">Link to Shopify SKU</th></tr>
+          ${needsLinkingRows}
+        </table>`
+      : `<p>Nothing currently blocked on a SKU mismatch.</p>`
+  }
+
+  <h2>Add a link</h2>
+  <form method="POST" action="/sku-linking" class="field-form">
+    <input type="hidden" name="action" value="link">
+    <div class="field">
+      <label>Etsy SKU</label>
+      <input type="text" name="etsySku" required>
+    </div>
+    <div class="field">
+      <label>Shopify SKU</label>
+      <input type="text" name="shopifySku" required>
+    </div>
+    <button type="submit">Link</button>
+  </form>
+
+  <h2>Existing links (${links.length})</h2>
+  ${
+    links.length > 0
+      ? `<table>
+          <tr><th>Etsy SKU</th><th>Shopify SKU</th><th></th></tr>
+          ${existingLinksRows}
+        </table>`
+      : `<p>No manual links yet.</p>`
+  }`;
+
+  return renderPage({ title: "Etsy → Shopify SKU linking", bodyHtml });
+}
+
+function handleSkuLinkingGet(res: ServerResponse): void {
+  const { html, headers } = skuLinkingPageHtml({});
+  sendHtml(res, 200, html, headers);
+}
+
+async function handleSkuLinkingPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const action = params.get("action");
+  const etsySku = params.get("etsySku")?.trim();
+
+  if (!etsySku) {
+    const { html, headers } = skuLinkingPageHtml({ message: "Etsy SKU is required.", messageIsError: true });
+    sendHtml(res, 400, html, headers);
+    return;
+  }
+
+  if (action === "unlink") {
+    deleteSkuLink(etsySku);
+    const { html, headers } = skuLinkingPageHtml({ message: `Removed link for "${etsySku}".` });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
+  const shopifySku = params.get("shopifySku")?.trim();
+  if (!shopifySku) {
+    const { html, headers } = skuLinkingPageHtml({ message: "Shopify SKU is required.", messageIsError: true });
+    sendHtml(res, 400, html, headers);
+    return;
+  }
+
+  const variant = await findVariantBySku(shopifySku);
+  if (!variant) {
+    const { html, headers } = skuLinkingPageHtml({
+      message: `No Shopify variant found with SKU "${shopifySku}" — not saved.`,
+      messageIsError: true,
+    });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
+  setSkuLink(etsySku, shopifySku);
+  logger.info("SKU link saved via /sku-linking", { etsySku, shopifySku });
+  const { html, headers } = skuLinkingPageHtml({
+    message: `Linked Etsy SKU "${etsySku}" to Shopify SKU "${shopifySku}". Will retry on the next sync tick.`,
+  });
   sendHtml(res, 200, html, headers);
 }
 
@@ -450,6 +613,8 @@ export function startServer(): void {
         if (url.pathname === "/health") return handleHealth(res);
         if (url.pathname === "/setup" && req.method === "POST") return handleSetupPost(req, res);
         if (url.pathname === "/setup") return handleSetupGet(res);
+        if (url.pathname === "/sku-linking" && req.method === "POST") return handleSkuLinkingPost(req, res);
+        if (url.pathname === "/sku-linking") return handleSkuLinkingGet(res);
         if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");

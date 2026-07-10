@@ -102,6 +102,12 @@ orders going forward, not import your whole order history. To pull in older orde
   any receipts flagged for manual review. Auto-refreshes every 30 seconds.
 - **`/log`** — the full history of successfully synced orders (Etsy receipt id,
   linked Shopify order, order date, sync time), most recent 200.
+- **`/sku-linking`** — manually map an Etsy listing SKU to a Shopify variant SKU, for
+  cases where they were never going to match exactly (typos, different naming
+  conventions, etc.). Shows which SKUs currently have a receipt stuck on them, lets
+  you link one to a real Shopify SKU (validated against the store before saving), and
+  the fix takes effect on the very next sync tick — no need to edit the SKU on either
+  the Etsy listing or the Shopify product itself.
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.
