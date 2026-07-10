@@ -9,8 +9,13 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
-import { getFlaggedReceipts } from "./db/receiptStore.js";
+import { getReceiptById } from "./etsy/receipts.js";
+import { getFlaggedReceipts, markSynced } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
+import { getShopCurrencyCode } from "./shopify/shopInfo.js";
+import { buildOrderInput, createOrder } from "./shopify/orders.js";
+import { decrementInventory } from "./shopify/inventory.js";
+import { resolveLineItems } from "./sync/mapping.js";
 import { logger } from "./logger.js";
 
 // Short-lived, in-memory only: a PKCE verifier only needs to survive the few seconds
@@ -102,6 +107,47 @@ function handleHealth(res: ServerResponse): void {
   });
 }
 
+// TEMPORARY, ONE-OFF: reprocess a single specific receipt through the real pipeline
+// (SKU match, order create, inventory decrement, mark synced), bypassing the normal
+// date-range checkpoint fetch since the checkpoint has already moved past its date.
+// Used to recreate #1174 (receipt 4111842377) after it was cancelled to fix the
+// requiresShipping bug. Remove once run once.
+async function handleResyncReceipt(url: URL, res: ServerResponse): Promise<void> {
+  const receiptId = url.searchParams.get("id");
+  if (!receiptId) {
+    sendJson(res, 400, { error: "missing ?id=<etsy receipt id>" });
+    return;
+  }
+
+  const shopId = getShopId();
+  const receipt = await getReceiptById(shopId, receiptId);
+  const { resolved, unresolved } = await resolveLineItems(receipt);
+  if (unresolved.length > 0) {
+    sendJson(res, 200, { ok: false, unresolved });
+    return;
+  }
+
+  const currencyCode = await getShopCurrencyCode();
+  const orderInput = buildOrderInput(receipt, resolved, currencyCode);
+  const result = await createOrder(orderInput);
+  if ("userErrors" in result) {
+    sendJson(res, 200, { ok: false, userErrors: result.userErrors });
+    return;
+  }
+
+  for (const line of resolved) {
+    await decrementInventory({
+      inventoryItemId: line.variant.inventoryItemId,
+      quantity: line.quantity,
+      shopifyOrderId: result.orderId,
+      etsyReceiptId: receiptId,
+    });
+  }
+
+  markSynced({ etsyReceiptId: receiptId, shopifyOrderId: result.orderId, receiptCreatedTs: receipt.created_timestamp });
+  sendJson(res, 200, { ok: true, orderId: result.orderId, orderName: result.orderName });
+}
+
 export function startServer(): void {
   const { PORT } = getEnv();
 
@@ -113,6 +159,7 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
+        if (url.pathname === "/debug/resync-receipt") return handleResyncReceipt(url, res);
         if (url.pathname === "/") {
           return sendHtml(
             res,
