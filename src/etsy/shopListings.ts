@@ -138,6 +138,61 @@ export async function createDraftListing(shopId: string, input: DraftListingInpu
   return { listingId: data.listing_id };
 }
 
+interface ListingInventoryGetResponse {
+  products: Array<{
+    is_deleted: boolean;
+    offerings: Array<{
+      quantity: number;
+      is_enabled: boolean;
+      is_deleted: boolean;
+      price: { amount: number; divisor: number };
+      readiness_state_id: number | null;
+    }>;
+  }>;
+}
+
+/**
+ * Sets the SKU on a listing's (first, non-deleted) product, preserving its existing offerings.
+ * Used to push a Shopify SKU onto a newly created Etsy draft listing so the two already match —
+ * Etsy's listing-creation endpoint has no `sku` field, so this requires a separate inventory call.
+ */
+export async function setListingSku(listingId: number, sku: string): Promise<void> {
+  const getRes = await etsyFetch(`/application/listings/${listingId}/inventory`);
+  if (!getRes.ok) {
+    throw new Error(`Failed to fetch Etsy listing inventory ${listingId} (${getRes.status}): ${await getRes.text()}`);
+  }
+  const data = (await getRes.json()) as ListingInventoryGetResponse;
+  const product = data.products.find((p) => !p.is_deleted);
+  if (!product) {
+    throw new Error(`Etsy listing ${listingId} has no inventory product to set a SKU on`);
+  }
+
+  const putBody = {
+    products: [
+      {
+        sku,
+        offerings: product.offerings
+          .filter((o) => !o.is_deleted)
+          .map((o) => ({
+            quantity: o.quantity,
+            is_enabled: o.is_enabled,
+            price: o.price.amount / o.price.divisor,
+            readiness_state_id: o.readiness_state_id ?? undefined,
+          })),
+      },
+    ],
+  };
+
+  const putRes = await etsyFetch(`/application/listings/${listingId}/inventory`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(putBody),
+  });
+  if (!putRes.ok) {
+    throw new Error(`Failed to set Etsy listing SKU on ${listingId} (${putRes.status}): ${await putRes.text()}`);
+  }
+}
+
 interface UploadListingImageResponse {
   listing_image_id: number;
 }

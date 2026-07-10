@@ -23,6 +23,7 @@ import {
   getReadinessStateDefinitions,
   createDraftListing,
   uploadListingImage,
+  setListingSku,
   type DraftListingInput,
 } from "./etsy/shopListings.js";
 import sharp from "sharp";
@@ -870,6 +871,12 @@ async function listToEtsyProductPageHtml(params: {
       <input type="number" name="quantity" step="1" min="1" value="${product.totalInventory > 0 ? product.totalInventory : 1}" required>
     </div>
     <div class="field">
+      <label>SKU</label>
+      <input type="text" name="etsySku" value="${escapeHtml(product.sku ?? "")}">
+      <p class="hint">Pushed onto the new Etsy listing after it's created, so it already matches
+      this Shopify product's SKU. Leave blank to skip and set it manually on Etsy later.</p>
+    </div>
+    <div class="field">
       <label>Category (Etsy taxonomy)</label>
       <div class="combobox" id="taxonomy-combobox">
         <input type="text" id="taxonomy-search" placeholder="Type a word to search, e.g. &quot;bags&quot;" autocomplete="off">
@@ -1071,6 +1078,7 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   const shippingProfileIdRaw = params.get("shippingProfileId");
   const readinessStateId = Number(params.get("readinessStateId"));
   const isSupply = params.has("isSupply");
+  const etsySku = params.get("etsySku")?.trim();
 
   if (
     !title ||
@@ -1115,6 +1123,22 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
     recordEtsyListingLink(productId, String(listingId));
     logger.info("Created Etsy draft listing from Shopify product", { productId, listingId });
 
+    let skuSummary = "";
+    if (etsySku) {
+      try {
+        await setListingSku(listingId, etsySku);
+        skuSummary = ` SKU "${etsySku}" set on the new listing.`;
+      } catch (error) {
+        logger.error("Failed to set SKU on new Etsy listing", {
+          productId,
+          listingId,
+          etsySku,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        skuSummary = ` Couldn't set the SKU on the new listing — check logs and set it manually on Etsy.`;
+      }
+    }
+
     const product = await getProductDetail(productId);
     let imageSummary = "No product images found to upload.";
     if (product && product.imageUrls.length > 0) {
@@ -1127,7 +1151,7 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
 
     const { html, headers, status } = await listToEtsyProductPageHtml({
       productId,
-      message: `Draft listing #${listingId} created on Etsy. ${imageSummary} Review it on Etsy before publishing.`,
+      message: `Draft listing #${listingId} created on Etsy.${skuSummary} ${imageSummary} Review it on Etsy before publishing.`,
     });
     sendHtml(res, status, html, headers);
   } catch (error) {
