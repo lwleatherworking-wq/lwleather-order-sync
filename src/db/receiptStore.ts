@@ -87,6 +87,32 @@ export function getFlaggedReceipts(): Array<{
   }));
 }
 
+export function getSyncedReceipts(limit = 100): Array<{
+  etsyReceiptId: string;
+  shopifyOrderId: string | null;
+  syncedAt: number;
+  receiptCreatedTs: number;
+}> {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT etsy_receipt_id, shopify_order_id, synced_at, receipt_created_ts
+       FROM synced_receipts WHERE status = 'synced' ORDER BY synced_at DESC LIMIT ?`
+    )
+    .all(limit) as Array<{
+    etsy_receipt_id: string;
+    shopify_order_id: string | null;
+    synced_at: number;
+    receipt_created_ts: number;
+  }>;
+  return rows.map((r) => ({
+    etsyReceiptId: r.etsy_receipt_id,
+    shopifyOrderId: r.shopify_order_id,
+    syncedAt: r.synced_at,
+    receiptCreatedTs: r.receipt_created_ts,
+  }));
+}
+
 /** Returns the min_created (unix seconds) checkpoint to resume polling from, with a small
  * overlap buffer applied by the caller so nothing near the boundary gets missed. */
 export function getCheckpoint(): number | undefined {

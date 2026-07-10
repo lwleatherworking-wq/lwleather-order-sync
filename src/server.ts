@@ -11,7 +11,7 @@ import {
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
 import { clearCachedShopifyToken } from "./shopify/apiClient.js";
-import { getFlaggedReceipts } from "./db/receiptStore.js";
+import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
 
@@ -125,6 +125,81 @@ function formatTimestamp(ms: number | undefined): string {
   return new Date(ms).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
+const SHARED_STYLE = `
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 2rem; }
+    nav.in-page { margin-bottom: 1.5rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
+    .badge.ok { background: #d1f7dd; color: #12603a; }
+    .badge.bad { background: #fde2e2; color: #8a1f1f; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; }
+    dt { color: #666; }
+    footer { margin-top: 2rem; font-size: 0.8rem; color: #888; }
+    .banner { padding: 0.6rem 0.8rem; border-radius: 6px; }
+    .banner.success { background: #d1f7dd; color: #12603a; }
+    .banner.error { background: #fde2e2; color: #8a1f1f; }
+    .field { margin-bottom: 1rem; }
+    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+    input[type="text"], input[type="password"], input[type="number"], input[type="date"] {
+      width: 100%; padding: 0.4rem 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;
+    }
+    .hint { color: #666; font-size: 0.8rem; margin: 0.2rem 0 0; }
+    button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: #1a1a1a; color: white; font-size: 0.95rem; cursor: pointer; }
+`;
+
+/**
+ * Common HTML shell for every page: the App Bridge script (so this can be embedded as
+ * a tab inside Shopify Admin), an <s-app-nav> sidebar menu (Shopify's current documented
+ * way to add left-sidebar tabs to an embedded app — unverified against a real embedded
+ * session at build time, see README), and a plain in-page nav as a fallback that works
+ * regardless of whether the sidebar menu renders.
+ */
+function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: number }): {
+  html: string;
+  headers?: Record<string, string>;
+} {
+  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID } = getEffectiveConfig();
+  // Both may be unset before /setup is completed — pages must still render (just not
+  // yet embeddable/App-Bridge-enabled) rather than crash.
+  const appBridgeTag = SHOPIFY_CLIENT_ID
+    ? `<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${escapeHtml(SHOPIFY_CLIENT_ID)}"></script>`
+    : "";
+
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  ${params.refreshSeconds ? `<meta http-equiv="refresh" content="${params.refreshSeconds}">` : ""}
+  <title>${escapeHtml(params.title)}</title>
+  ${appBridgeTag}
+  <style>${SHARED_STYLE}</style>
+</head>
+<body>
+  <s-app-nav>
+    <s-link href="/" rel="home">Status</s-link>
+    <s-link href="/log">Log</s-link>
+    <s-link href="/setup">Setup</s-link>
+  </s-app-nav>
+  <nav class="in-page"><a href="/">Status</a> · <a href="/log">Log</a> · <a href="/setup">Setup</a></nav>
+  ${params.bodyHtml}
+</body>
+</html>`;
+
+  return {
+    html,
+    // Required for Shopify to allow embedding pages inside Admin: scoped to this specific
+    // shop rather than a wildcard, since a wildcard would let any shop iframe it. Before
+    // the store domain is configured, there's no shop to scope to yet, so framing isn't
+    // allowed until then.
+    headers: SHOPIFY_STORE_DOMAIN
+      ? { "Content-Security-Policy": `frame-ancestors https://${SHOPIFY_STORE_DOMAIN} https://admin.shopify.com;` }
+      : undefined,
+  };
+}
+
 function handleStatusPage(res: ServerResponse): void {
   const status = getStatusData();
   const lastRun = status.lastRun as
@@ -145,40 +220,8 @@ function handleStatusPage(res: ServerResponse): void {
     )
     .join("");
 
-  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID } = getEffectiveConfig();
-  // Both may be unset before /setup is completed — the page must still render (just not
-  // yet embeddable/App-Bridge-enabled) rather than crash.
-  const appBridgeTag = SHOPIFY_CLIENT_ID
-    ? `<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${escapeHtml(SHOPIFY_CLIENT_ID)}"></script>`
-    : "";
-
-  sendHtml(
-    res,
-    200,
-    `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta http-equiv="refresh" content="30">
-  <title>Etsy → Shopify sync status</title>
-  ${appBridgeTag}
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
-    h1 { font-size: 1.4rem; }
-    h2 { font-size: 1.05rem; margin-top: 2rem; }
-    .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
-    .badge.ok { background: #d1f7dd; color: #12603a; }
-    .badge.bad { background: #fde2e2; color: #8a1f1f; }
-    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.9rem; }
-    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
-    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; }
-    dt { color: #666; }
-    footer { margin-top: 2rem; font-size: 0.8rem; color: #888; }
-  </style>
-</head>
-<body>
+  const bodyHtml = `
   <h1>Etsy → Shopify order sync</h1>
-  <nav><a href="/">Status</a> · <a href="/setup">Setup</a></nav>
 
   <dl>
     <dt>Etsy</dt><dd>${authBadge}</dd>
@@ -208,17 +251,52 @@ function handleStatusPage(res: ServerResponse): void {
       : `<p>Nothing flagged — all good.</p>`
   }
 
-  <footer>Auto-refreshes every 30s. Raw JSON at <a href="/health">/health</a>.</footer>
-</body>
-</html>`,
-    // Required for Shopify to allow embedding this page inside Admin: scoped to this
-    // specific shop rather than a wildcard, since a wildcard would let any shop iframe it.
-    // Before the store domain is configured, there's no shop to scope to yet, so framing
-    // just isn't allowed until then.
-    SHOPIFY_STORE_DOMAIN
-      ? { "Content-Security-Policy": `frame-ancestors https://${SHOPIFY_STORE_DOMAIN} https://admin.shopify.com;` }
-      : undefined
-  );
+  <footer>Auto-refreshes every 30s. Raw JSON at <a href="/health">/health</a>. Full sync history at <a href="/log">/log</a>.</footer>`;
+
+  const { html, headers } = renderPage({ title: "Etsy → Shopify sync status", bodyHtml, refreshSeconds: 30 });
+  sendHtml(res, 200, html, headers);
+}
+
+/** Extracts the numeric id from a Shopify GID like "gid://shopify/Order/123". */
+function numericIdFromGid(gid: string | null): string | null {
+  if (!gid) return null;
+  return gid.split("/").pop() || null;
+}
+
+function handleLogPage(res: ServerResponse): void {
+  const synced = getSyncedReceipts(200);
+  const { SHOPIFY_STORE_DOMAIN } = getEffectiveConfig();
+
+  const rows = synced
+    .map((r) => {
+      const numericId = numericIdFromGid(r.shopifyOrderId);
+      const orderCell =
+        numericId && SHOPIFY_STORE_DOMAIN
+          ? `<a href="https://${escapeHtml(SHOPIFY_STORE_DOMAIN)}/admin/orders/${escapeHtml(numericId)}" target="_blank" rel="noopener">Order ${escapeHtml(numericId)}</a>`
+          : escapeHtml(numericId ?? "—");
+      return `<tr>
+        <td>${escapeHtml(r.etsyReceiptId)}</td>
+        <td>${orderCell}</td>
+        <td>${formatTimestamp(r.receiptCreatedTs * 1000)}</td>
+        <td>${formatTimestamp(r.syncedAt)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const bodyHtml = `
+  <h1>Synced orders log</h1>
+  <p>Most recent ${synced.length} successfully synced orders.</p>
+  ${
+    synced.length > 0
+      ? `<table>
+          <tr><th>Etsy receipt</th><th>Shopify order</th><th>Etsy order date</th><th>Synced at</th></tr>
+          ${rows}
+        </table>`
+      : `<p>Nothing synced yet.</p>`
+  }`;
+
+  const { html, headers } = renderPage({ title: "Etsy → Shopify sync log", bodyHtml });
+  sendHtml(res, 200, html, headers);
 }
 
 interface SetupField {
@@ -283,7 +361,7 @@ function renderSetupField(field: SetupField, config: ReturnType<typeof getEffect
   </div>`;
 }
 
-function setupPageHtml(params: { message?: string; messageIsError?: boolean }): string {
+function setupPageHtml(params: { message?: string; messageIsError?: boolean }): { html: string; headers?: Record<string, string> } {
   const config = getEffectiveConfig();
   const { SETUP_PASSWORD } = getEnv();
   const fieldsHtml = SETUP_FIELDS.map((f) => renderSetupField(f, config)).join("\n");
@@ -296,30 +374,8 @@ function setupPageHtml(params: { message?: string; messageIsError?: boolean }): 
     ? `<p class="banner error">SETUP_PASSWORD is not set as an environment variable — this form can't save changes until it is.</p>`
     : "";
 
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Etsy → Shopify sync setup</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
-    h1 { font-size: 1.4rem; }
-    nav { margin-bottom: 1.5rem; }
-    .field { margin-bottom: 1rem; }
-    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-    input[type="text"], input[type="password"], input[type="number"], input[type="date"] {
-      width: 100%; padding: 0.4rem 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;
-    }
-    .hint { color: #666; font-size: 0.8rem; margin: 0.2rem 0 0; }
-    .banner { padding: 0.6rem 0.8rem; border-radius: 6px; }
-    .banner.success { background: #d1f7dd; color: #12603a; }
-    .banner.error { background: #fde2e2; color: #8a1f1f; }
-    button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: #1a1a1a; color: white; font-size: 0.95rem; cursor: pointer; }
-  </style>
-</head>
-<body>
+  const bodyHtml = `
   <h1>Setup</h1>
-  <nav><a href="/">Status</a> · <a href="/setup">Setup</a></nav>
 
   ${banner}
   ${passwordWarning}
@@ -331,13 +387,14 @@ function setupPageHtml(params: { message?: string; messageIsError?: boolean }): 
       <input type="password" name="password" required>
     </div>
     <button type="submit">Save</button>
-  </form>
-</body>
-</html>`;
+  </form>`;
+
+  return renderPage({ title: "Etsy → Shopify sync setup", bodyHtml });
 }
 
 function handleSetupGet(res: ServerResponse): void {
-  sendHtml(res, 200, setupPageHtml({}));
+  const { html, headers } = setupPageHtml({});
+  sendHtml(res, 200, html, headers);
 }
 
 async function handleSetupPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -346,11 +403,13 @@ async function handleSetupPost(req: IncomingMessage, res: ServerResponse): Promi
   const { SETUP_PASSWORD } = getEnv();
 
   if (!SETUP_PASSWORD) {
-    sendHtml(res, 403, setupPageHtml({ message: "SETUP_PASSWORD is not configured — set it as an env var first.", messageIsError: true }));
+    const { html, headers } = setupPageHtml({ message: "SETUP_PASSWORD is not configured — set it as an env var first.", messageIsError: true });
+    sendHtml(res, 403, html, headers);
     return;
   }
   if (params.get("password") !== SETUP_PASSWORD) {
-    sendHtml(res, 401, setupPageHtml({ message: "Incorrect setup password.", messageIsError: true }));
+    const { html, headers } = setupPageHtml({ message: "Incorrect setup password.", messageIsError: true });
+    sendHtml(res, 401, html, headers);
     return;
   }
 
@@ -374,7 +433,8 @@ async function handleSetupPost(req: IncomingMessage, res: ServerResponse): Promi
   }
 
   logger.info("Settings updated via /setup");
-  sendHtml(res, 200, setupPageHtml({ message: "Settings saved." }));
+  const { html, headers } = setupPageHtml({ message: "Settings saved." });
+  sendHtml(res, 200, html, headers);
 }
 
 export function startServer(): void {
@@ -390,6 +450,7 @@ export function startServer(): void {
         if (url.pathname === "/health") return handleHealth(res);
         if (url.pathname === "/setup" && req.method === "POST") return handleSetupPost(req, res);
         if (url.pathname === "/setup") return handleSetupGet(res);
+        if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");
       })

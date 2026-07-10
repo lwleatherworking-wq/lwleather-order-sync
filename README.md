@@ -96,24 +96,32 @@ orders going forward, not import your whole order history. To pull in older orde
    future tick keeps needlessly re-scanning that whole date range (harmless, since
    already-synced orders are skipped, but wasteful).
 
-## Status page
+## Pages
 
-Visit the deployed URL directly (`https://{your-deployed-url}/`) for a readable status
-dashboard — Etsy connection state, the last sync run's counts, and any receipts flagged
-for manual review. It auto-refreshes every 30 seconds. Raw JSON is still available at
-`/health` for scripting.
+- **`/`** — status dashboard: Etsy connection state, the last sync run's counts, and
+  any receipts flagged for manual review. Auto-refreshes every 30 seconds.
+- **`/log`** — the full history of successfully synced orders (Etsy receipt id,
+  linked Shopify order, order date, sync time), most recent 200.
+- **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
+  public URL, sync interval, dry-run toggle, and backfill date without touching
+  Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.
+  Settings saved here take effect on the very next read (the sync interval and
+  dry-run toggle apply on the next tick; Shopify credential changes force a fresh
+  token fetch immediately).
+- **`/health`** — raw JSON version of the status page, for scripting.
 
-This page can also be **embedded inside Shopify Admin** as an app tab: in the Dev
+## Embedding inside Shopify Admin
+
+These pages can be **embedded inside Shopify Admin** as an app tab: in the Dev
 Dashboard, set the app's **App URL** to the deployed URL and enable "embedded app" if
 offered. Shopify will then show it as an entry under Apps in your store's admin sidebar.
 
-## Setup page
-
-`/setup` lets you configure (or change) Etsy/Shopify credentials, the store domain,
-public URL, sync interval, dry-run toggle, and backfill date without touching Railway's
-dashboard or redeploying — protected by the `SETUP_PASSWORD` env var. Settings saved
-here take effect on the very next read (the sync interval and dry-run toggle apply on
-the next tick; Shopify credential changes force a fresh token fetch immediately).
+Each page includes a left-sidebar navigation menu (Status/Log/Setup) using Shopify's
+`<s-app-nav>` component, plus a plain in-page nav bar as a fallback. **The sidebar menu
+could not be fully verified without an actual embedded session** — Shopify's App Bridge
+only activates these components when genuinely running inside Shopify's iframe, which
+isn't something that could be tested from outside it. If the sidebar tabs don't appear
+once installed, the in-page nav links at the top of each page work regardless.
 
 ## Verifying before you trust it
 
