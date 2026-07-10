@@ -18,8 +18,8 @@ import { logger } from "./logger.js";
 const pendingAuth = new Map<string, { verifier: string; createdAt: number }>();
 const PENDING_AUTH_TTL_MS = 10 * 60 * 1000;
 
-function sendHtml(res: ServerResponse, status: number, html: string): void {
-  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+function sendHtml(res: ServerResponse, status: number, html: string, extraHeaders?: Record<string, string>): void {
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", ...extraHeaders });
   res.end(html);
 }
 
@@ -143,6 +143,8 @@ function handleStatusPage(res: ServerResponse): void {
     )
     .join("");
 
+  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID } = getEnv();
+
   sendHtml(
     res,
     200,
@@ -152,6 +154,7 @@ function handleStatusPage(res: ServerResponse): void {
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="30">
   <title>Etsy → Shopify sync status</title>
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${escapeHtml(SHOPIFY_CLIENT_ID)}"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
     h1 { font-size: 1.4rem; }
@@ -199,7 +202,10 @@ function handleStatusPage(res: ServerResponse): void {
 
   <footer>Auto-refreshes every 30s. Raw JSON at <a href="/health">/health</a>.</footer>
 </body>
-</html>`
+</html>`,
+    // Required for Shopify to allow embedding this page inside Admin: scoped to this
+    // specific shop rather than a wildcard, since a wildcard would let any shop iframe it.
+    { "Content-Security-Policy": `frame-ancestors https://${SHOPIFY_STORE_DOMAIN} https://admin.shopify.com;` }
   );
 }
 
