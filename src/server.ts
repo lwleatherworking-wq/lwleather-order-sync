@@ -13,6 +13,7 @@ import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
 import { getFlaggedReceipts } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
+import { getPrimaryLocationId } from "./shopify/locations.js";
 import { logger } from "./logger.js";
 
 // Short-lived, in-memory only: a PKCE verifier only needs to survive the few seconds
@@ -134,6 +135,17 @@ function handleDebugFs(res: ServerResponse): void {
   });
 }
 
+// TEMPORARY: safely verify the read_locations scope fix without going through order
+// creation. Remove once confirmed working.
+async function handleDebugLocation(res: ServerResponse): Promise<void> {
+  try {
+    const locationId = await getPrimaryLocationId();
+    sendJson(res, 200, { ok: true, locationId });
+  } catch (error) {
+    sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 export function startServer(): void {
   const { PORT } = getEnv();
 
@@ -146,6 +158,7 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
         if (url.pathname === "/debug/fs") return handleDebugFs(res);
+        if (url.pathname === "/debug/location") return handleDebugLocation(res);
         if (url.pathname === "/") {
           return sendHtml(
             res,
