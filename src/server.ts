@@ -11,7 +11,7 @@ import {
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
 import { clearCachedShopifyToken } from "./shopify/apiClient.js";
-import { findVariantBySku } from "./shopify/variantLookup.js";
+import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
 import { getDb } from "./db/client.js";
@@ -323,10 +323,11 @@ function getUnmatchedSkus(): string[] {
   return Array.from(skus);
 }
 
-function skuLinkingPageHtml(params: { message?: string; messageIsError?: boolean }): { html: string; headers?: Record<string, string> } {
+async function skuLinkingPageHtml(params: { message?: string; messageIsError?: boolean }): Promise<{ html: string; headers?: Record<string, string> }> {
   const unmatched = getUnmatchedSkus();
   const links = listSkuLinks();
   const linkedSet = new Set(links.map((l) => l.etsySku));
+  const shopifySkus = await listShopifySkus();
 
   const banner = params.message
     ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
@@ -369,6 +370,10 @@ function skuLinkingPageHtml(params: { message?: string; messageIsError?: boolean
     )
     .join("");
 
+  const shopifySkuRows = shopifySkus
+    .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.displayName)}</td></tr>`)
+    .join("");
+
   const bodyHtml = `
   <h1>SKU linking</h1>
   <p>Manually map an Etsy listing SKU to a Shopify variant SKU, for cases where they were
@@ -408,13 +413,28 @@ function skuLinkingPageHtml(params: { message?: string; messageIsError?: boolean
           ${existingLinksRows}
         </table>`
       : `<p>No manual links yet.</p>`
+  }
+
+  <h2>Shopify SKUs already matched (${shopifySkus.length})</h2>
+  <p>Every SKU currently set on a Shopify variant — for reference when typing a SKU into
+  the forms above.</p>
+  ${
+    shopifySkus.length > 0
+      ? `<details>
+          <summary>Show all ${shopifySkus.length}</summary>
+          <table>
+            <tr><th>SKU</th><th>Product / variant</th></tr>
+            ${shopifySkuRows}
+          </table>
+        </details>`
+      : `<p>No Shopify variants have a SKU set yet.</p>`
   }`;
 
   return renderPage({ title: "Etsy → Shopify SKU linking", bodyHtml });
 }
 
-function handleSkuLinkingGet(res: ServerResponse): void {
-  const { html, headers } = skuLinkingPageHtml({});
+async function handleSkuLinkingGet(res: ServerResponse): Promise<void> {
+  const { html, headers } = await skuLinkingPageHtml({});
   sendHtml(res, 200, html, headers);
 }
 
@@ -425,28 +445,28 @@ async function handleSkuLinkingPost(req: IncomingMessage, res: ServerResponse): 
   const etsySku = params.get("etsySku")?.trim();
 
   if (!etsySku) {
-    const { html, headers } = skuLinkingPageHtml({ message: "Etsy SKU is required.", messageIsError: true });
+    const { html, headers } = await skuLinkingPageHtml({ message: "Etsy SKU is required.", messageIsError: true });
     sendHtml(res, 400, html, headers);
     return;
   }
 
   if (action === "unlink") {
     deleteSkuLink(etsySku);
-    const { html, headers } = skuLinkingPageHtml({ message: `Removed link for "${etsySku}".` });
+    const { html, headers } = await skuLinkingPageHtml({ message: `Removed link for "${etsySku}".` });
     sendHtml(res, 200, html, headers);
     return;
   }
 
   const shopifySku = params.get("shopifySku")?.trim();
   if (!shopifySku) {
-    const { html, headers } = skuLinkingPageHtml({ message: "Shopify SKU is required.", messageIsError: true });
+    const { html, headers } = await skuLinkingPageHtml({ message: "Shopify SKU is required.", messageIsError: true });
     sendHtml(res, 400, html, headers);
     return;
   }
 
   const variant = await findVariantBySku(shopifySku);
   if (!variant) {
-    const { html, headers } = skuLinkingPageHtml({
+    const { html, headers } = await skuLinkingPageHtml({
       message: `No Shopify variant found with SKU "${shopifySku}" — not saved.`,
       messageIsError: true,
     });
@@ -456,7 +476,7 @@ async function handleSkuLinkingPost(req: IncomingMessage, res: ServerResponse): 
 
   setSkuLink(etsySku, shopifySku);
   logger.info("SKU link saved via /sku-linking", { etsySku, shopifySku });
-  const { html, headers } = skuLinkingPageHtml({
+  const { html, headers } = await skuLinkingPageHtml({
     message: `Linked Etsy SKU "${etsySku}" to Shopify SKU "${shopifySku}". Will retry on the next sync tick.`,
   });
   sendHtml(res, 200, html, headers);
