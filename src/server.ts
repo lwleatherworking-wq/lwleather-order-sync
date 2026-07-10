@@ -437,7 +437,7 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
           <form method="POST" action="/sku-linking" class="inline-form">
             <input type="hidden" name="action" value="link">
             <input type="hidden" name="etsySku" value="${escapeHtml(sku)}">
-            <input type="text" name="shopifySku" placeholder="Shopify SKU to link to" required>
+            <input type="text" name="shopifySku" list="shopify-sku-options" placeholder="Shopify SKU to link to" required>
             <button type="submit">Link</button>
           </form>
         </td>
@@ -469,6 +469,16 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
     .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.listingTitle)}</td></tr>`)
     .join("");
 
+  const shopifySkuOptionsHtml = shopifySkus
+    .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.displayName)}</option>`)
+    .join("");
+  const etsySkuOptionsHtml = etsySkus
+    .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.listingTitle)}</option>`)
+    .join("");
+  const skuDatalistsHtml = `
+    <datalist id="shopify-sku-options">${shopifySkuOptionsHtml}</datalist>
+    <datalist id="etsy-sku-options">${etsySkuOptionsHtml}</datalist>`;
+
   const bodyHtml = `
   <h1>SKU linking</h1>
   <p>Manually map an Etsy listing SKU to a Shopify variant SKU, for cases where they were
@@ -491,14 +501,15 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
     <input type="hidden" name="action" value="link">
     <div class="field">
       <label>Etsy SKU</label>
-      <input type="text" name="etsySku" required>
+      <input type="text" name="etsySku" list="etsy-sku-options" required>
     </div>
     <div class="field">
       <label>Shopify SKU</label>
-      <input type="text" name="shopifySku" required>
+      <input type="text" name="shopifySku" list="shopify-sku-options" required>
     </div>
     <button type="submit">Link</button>
   </form>
+  ${skuDatalistsHtml}
 
   <h2>Existing links (${links.length})</h2>
   ${
