@@ -675,9 +675,11 @@ async function listToEtsyProductPageHtml(params: {
   const readinessOptionsHtml = readinessStates
     .map((r) => `<option value="${r.readinessStateDefinitionId}">${escapeHtml(r.label)}</option>`)
     .join("");
-  const taxonomyOptionsHtml = taxonomyOptions
-    .map((t) => `<option value="${t.id}">${escapeHtml(t.fullPath)}</option>`)
-    .join("");
+  const taxonomyDatalistHtml = taxonomyOptions.map((t) => `<option value="${escapeHtml(t.fullPath)}">`).join("");
+  const taxonomyMapJson = JSON.stringify(Object.fromEntries(taxonomyOptions.map((t) => [t.fullPath, t.id]))).replace(
+    /</g,
+    "\\u003c"
+  );
   const whenMadeOptionsHtml = WHEN_MADE_OPTIONS.map((v) => `<option value="${v}">${v.replace(/_/g, "-")}</option>`).join(
     ""
   );
@@ -709,10 +711,10 @@ async function listToEtsyProductPageHtml(params: {
     </div>
     <div class="field">
       <label>Category (Etsy taxonomy)</label>
-      <select name="taxonomyId" required>
-        <option value="">Select a category…</option>
-        ${taxonomyOptionsHtml}
-      </select>
+      <input type="text" id="taxonomy-search" list="taxonomy-options" placeholder="Type a word to search, e.g. &quot;bags&quot;" autocomplete="off">
+      <datalist id="taxonomy-options">${taxonomyDatalistHtml}</datalist>
+      <input type="hidden" name="taxonomyId" id="taxonomy-id">
+      <p class="hint" id="taxonomy-hint">Start typing, then pick a suggestion from the list.</p>
     </div>
     <div class="field">
       <label>Shipping profile</label>
@@ -743,7 +745,36 @@ async function listToEtsyProductPageHtml(params: {
     </div>
     <button type="submit">Create Etsy draft listing</button>
   </form>
-  <p><a href="/list-to-etsy">Back to product list</a></p>`;
+  <p><a href="/list-to-etsy">Back to product list</a></p>
+  <script>
+    (function () {
+      var TAXONOMY_MAP = ${taxonomyMapJson};
+      var search = document.getElementById("taxonomy-search");
+      var hidden = document.getElementById("taxonomy-id");
+      var hint = document.getElementById("taxonomy-hint");
+      function sync() {
+        var id = TAXONOMY_MAP[search.value];
+        if (id) {
+          hidden.value = id;
+          hint.textContent = "Selected.";
+        } else {
+          hidden.value = "";
+          hint.textContent = search.value
+            ? "No exact match yet — pick a suggestion from the list."
+            : "Start typing, then pick a suggestion from the list.";
+        }
+      }
+      search.addEventListener("input", sync);
+      search.form.addEventListener("submit", function (e) {
+        sync();
+        if (!hidden.value) {
+          e.preventDefault();
+          hint.textContent = "Please pick a category from the suggestions list before submitting.";
+          search.focus();
+        }
+      });
+    })();
+  </script>`;
 
   return { ...renderPage({ title: `List "${product.title}" to Etsy`, bodyHtml }), status: 200 };
 }
