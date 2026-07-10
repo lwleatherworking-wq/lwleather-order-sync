@@ -466,7 +466,10 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
     .join("");
 
   const etsySkuRows = etsySkus
-    .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.listingTitle)}</td></tr>`)
+    .map(
+      (s) =>
+        `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.listingTitle)}${s.listingState === "draft" ? ` <span class="hint">(draft)</span>` : ""}</td></tr>`
+    )
     .join("");
 
   // Etsy SKUs that are already an identical string to a Shopify SKU sync automatically
