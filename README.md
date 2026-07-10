@@ -107,7 +107,10 @@ orders going forward, not import your whole order history. To pull in older orde
   conventions, etc.). Shows which SKUs currently have a receipt stuck on them, lets
   you link one to a real Shopify SKU (validated against the store before saving), and
   the fix takes effect on the very next sync tick — no need to edit the SKU on either
-  the Etsy listing or the Shopify product itself.
+  the Etsy listing or the Shopify product itself. Also lists every SKU already set on
+  a Shopify variant and every SKU set on an active Etsy listing, as a reference when
+  typing one into the forms. The Etsy list requires the `listings_r` OAuth scope — if
+  you connected Etsy before this was added, re-authorize once via `/oauth/etsy/start`.
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.

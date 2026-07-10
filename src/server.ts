@@ -10,6 +10,7 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
+import { listEtsySkus } from "./etsy/listings.js";
 import { clearCachedShopifyToken } from "./shopify/apiClient.js";
 import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
@@ -329,6 +330,17 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
   const linkedSet = new Set(links.map((l) => l.etsySku));
   const shopifySkus = await listShopifySkus();
 
+  let etsySkus: Awaited<ReturnType<typeof listEtsySkus>> = [];
+  let etsySkusError: string | undefined;
+  try {
+    etsySkus = await listEtsySkus(getShopId());
+  } catch (error) {
+    etsySkusError =
+      error instanceof Error
+        ? error.message
+        : "Could not load Etsy SKUs. If this app was authorized before listings_r was added, re-authorize via /oauth/etsy/start.";
+  }
+
   const banner = params.message
     ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
     : "";
@@ -372,6 +384,10 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
 
   const shopifySkuRows = shopifySkus
     .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.displayName)}</td></tr>`)
+    .join("");
+
+  const etsySkuRows = etsySkus
+    .map((s) => `<tr><td><code>${escapeHtml(s.sku)}</code></td><td>${escapeHtml(s.listingTitle)}</td></tr>`)
     .join("");
 
   const bodyHtml = `
@@ -428,6 +444,23 @@ async function skuLinkingPageHtml(params: { message?: string; messageIsError?: b
           </table>
         </details>`
       : `<p>No Shopify variants have a SKU set yet.</p>`
+  }
+
+  <h2>Etsy SKUs (${etsySkus.length})</h2>
+  <p>Every SKU currently set on an active Etsy listing — for reference when typing an
+  Etsy SKU into the forms above.</p>
+  ${
+    etsySkusError
+      ? `<p class="banner error">${escapeHtml(etsySkusError)}</p>`
+      : etsySkus.length > 0
+        ? `<details>
+            <summary>Show all ${etsySkus.length}</summary>
+            <table>
+              <tr><th>SKU</th><th>Listing</th></tr>
+              ${etsySkuRows}
+            </table>
+          </details>`
+        : `<p>No Etsy listings have a SKU set yet.</p>`
   }`;
 
   return renderPage({ title: "Etsy → Shopify SKU linking", bodyHtml });

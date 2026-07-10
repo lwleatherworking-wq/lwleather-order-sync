@@ -5,9 +5,10 @@ import type { EtsyTokenResponse } from "./types.js";
 const AUTHORIZE_URL = "https://www.etsy.com/oauth/connect";
 const TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token";
 
-// Etsy requires transactions_r to read shop receipts, and shops_r so the setup
-// flow can call GET /v3/application/users/me to discover the shop id.
-const SCOPES = "transactions_r shops_r";
+// Etsy requires transactions_r to read shop receipts, shops_r so the setup flow can
+// call GET /v3/application/users/me to discover the shop id, and listings_r to read
+// listing inventory (for the Etsy SKU reference list on /sku-linking).
+const SCOPES = "transactions_r shops_r listings_r";
 
 function base64url(input: Buffer): string {
   return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
