@@ -100,14 +100,11 @@ export async function syncOnce(): Promise<SyncRunSummary> {
         continue;
       }
 
-      for (const line of resolved) {
-        await decrementInventory({
-          inventoryItemId: line.variant.inventoryItemId,
-          quantity: line.quantity,
-          shopifyOrderId: result.orderId,
-        });
-      }
-
+      // Mark synced as soon as the order exists — before attempting inventory
+      // adjustment — so that a failure in the inventory step (a bug, a transient
+      // API error, anything) can never cause this receipt to be reprocessed into
+      // a duplicate order on the next tick. Worst case then is a logged inventory
+      // discrepancy to fix by hand, not another live duplicate order.
       markSynced({
         etsyReceiptId: String(receipt.receipt_id),
         shopifyOrderId: result.orderId,
@@ -120,6 +117,22 @@ export async function syncOnce(): Promise<SyncRunSummary> {
         shopifyOrderId: result.orderId,
         shopifyOrderName: result.orderName,
       });
+
+      try {
+        for (const line of resolved) {
+          await decrementInventory({
+            inventoryItemId: line.variant.inventoryItemId,
+            quantity: line.quantity,
+            shopifyOrderId: result.orderId,
+          });
+        }
+      } catch (inventoryError) {
+        logger.error("Order created but inventory decrement failed — needs manual correction", {
+          etsyReceiptId: receipt.receipt_id,
+          shopifyOrderId: result.orderId,
+          error: inventoryError instanceof Error ? inventoryError.message : String(inventoryError),
+        });
+      }
     } catch (error) {
       if (DRY_RUN) {
         logger.error("[dry-run] error while previewing receipt", {
