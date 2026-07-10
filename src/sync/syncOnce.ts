@@ -32,13 +32,24 @@ export async function syncOnce(): Promise<SyncRunSummary> {
     durationMs: 0,
   };
 
-  const { DRY_RUN } = getEnv();
+  const { DRY_RUN, BACKFILL_SINCE } = getEnv();
   const shopId = getShopId();
   const storedCheckpoint = getCheckpoint();
   const nowSeconds = Math.floor(Date.now() / 1000);
-  const since = storedCheckpoint
-    ? storedCheckpoint - CHECKPOINT_OVERLAP_SECONDS
-    : nowSeconds - DEFAULT_LOOKBACK_SECONDS;
+  const backfillSince = BACKFILL_SINCE
+    ? Math.floor(new Date(`${BACKFILL_SINCE}T00:00:00Z`).getTime() / 1000)
+    : undefined;
+  if (BACKFILL_SINCE && (backfillSince === undefined || Number.isNaN(backfillSince))) {
+    throw new Error(`BACKFILL_SINCE is not a valid date: "${BACKFILL_SINCE}" (expected e.g. "2026-06-10")`);
+  }
+  const since =
+    backfillSince ??
+    (storedCheckpoint ? storedCheckpoint - CHECKPOINT_OVERLAP_SECONDS : nowSeconds - DEFAULT_LOOKBACK_SECONDS);
+  if (backfillSince !== undefined) {
+    logger.info("BACKFILL_SINCE is set — fetching receipts from this date instead of the normal checkpoint", {
+      backfillSince: BACKFILL_SINCE,
+    });
+  }
 
   const receipts = await getPaidReceiptsSince(shopId, since);
   summary.receiptsSeen = receipts.length;

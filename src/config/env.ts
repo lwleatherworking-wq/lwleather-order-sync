@@ -52,6 +52,13 @@ const envSchema = z.object({
 
   DB_PATH: z.string().default("./data/sync.db"),
   PORT: z.coerce.number().int().positive().default(3000),
+
+  // One-time historical backfill switch: if set (e.g. "2026-06-10"), the next sync run(s)
+  // fetch Etsy receipts from this date forward instead of the normal checkpoint. Remove
+  // this var again once the backfill has run once — leaving it set makes every tick
+  // needlessly re-fetch the whole range instead of just what's new (harmless since already-
+  // synced receipts are skipped, just wasteful).
+  BACKFILL_SINCE: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

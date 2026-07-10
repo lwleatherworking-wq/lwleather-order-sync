@@ -77,6 +77,18 @@ Then visit `{PUBLIC_BASE_URL}/oauth/etsy/start` in a browser, log into Etsy, and
 authorize. Your shop id is discovered and stored automatically — no further manual
 config. The sync loop starts picking up orders on its next tick.
 
+### 5. (Optional) One-time historical backfill
+
+By default the very first sync only looks back 24 hours — it's meant to catch *new*
+orders going forward, not import your whole order history. To pull in older orders once:
+
+1. Set `BACKFILL_SINCE=2026-06-10` (or whatever date you want to start from) as an
+   environment variable and redeploy.
+2. Watch the logs for a `"Sync run complete"` line covering that range.
+3. **Remove the `BACKFILL_SINCE` variable again** and redeploy once more — otherwise
+   every future tick keeps needlessly re-scanning that whole date range (harmless, since
+   already-synced orders are skipped, but wasteful).
+
 ## Verifying before you trust it
 
 1. **Dry run**: `npm run dry-run` (locally, with a `.env` populated as in
