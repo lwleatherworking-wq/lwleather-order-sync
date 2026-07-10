@@ -79,7 +79,14 @@ async function handleOauthCallback(url: URL, res: ServerResponse): Promise<void>
   );
 }
 
-function handleHealth(res: ServerResponse): void {
+interface StatusData {
+  etsyAuthorized: boolean;
+  shopId: string | null;
+  lastRun: Record<string, unknown> | undefined;
+  flagged: ReturnType<typeof getFlaggedReceipts>;
+}
+
+function getStatusData(): StatusData {
   const db = getDb();
   const lastRun = db
     .prepare(`SELECT * FROM sync_runs ORDER BY run_at DESC LIMIT 1`)
@@ -93,13 +100,107 @@ function handleHealth(res: ServerResponse): void {
     shopId = null;
   }
 
+  return { etsyAuthorized: Boolean(getEtsyTokens()), shopId, lastRun, flagged };
+}
+
+function handleHealth(res: ServerResponse): void {
+  const status = getStatusData();
   sendJson(res, 200, {
     ok: true,
-    etsyAuthorized: Boolean(getEtsyTokens()),
-    shopId,
-    lastRun,
-    flaggedReceiptsNeedingReview: flagged.length,
+    etsyAuthorized: status.etsyAuthorized,
+    shopId: status.shopId,
+    lastRun: status.lastRun,
+    flaggedReceiptsNeedingReview: status.flagged.length,
   });
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+function formatTimestamp(ms: number | undefined): string {
+  if (!ms) return "never";
+  return new Date(ms).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function handleStatusPage(res: ServerResponse): void {
+  const status = getStatusData();
+  const lastRun = status.lastRun as
+    | { run_at: number; receipts_seen: number; receipts_synced: number; receipts_skipped: number; errors_count: number }
+    | undefined;
+
+  const authBadge = status.etsyAuthorized
+    ? `<span class="badge ok">Connected</span>`
+    : `<span class="badge bad">Not connected</span> — <a href="/oauth/etsy/start">authorize with Etsy</a>`;
+
+  const flaggedRows = status.flagged
+    .slice(0, 20)
+    .map(
+      (f) =>
+        `<tr><td>${escapeHtml(f.etsyReceiptId)}</td><td>${escapeHtml(f.status)}</td><td>${escapeHtml(
+          f.reason ?? ""
+        )}</td><td>${formatTimestamp(f.syncedAt)}</td></tr>`
+    )
+    .join("");
+
+  sendHtml(
+    res,
+    200,
+    `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="30">
+  <title>Etsy → Shopify sync status</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 2rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
+    .badge.ok { background: #d1f7dd; color: #12603a; }
+    .badge.bad { background: #fde2e2; color: #8a1f1f; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; }
+    dt { color: #666; }
+    footer { margin-top: 2rem; font-size: 0.8rem; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>Etsy → Shopify order sync</h1>
+
+  <dl>
+    <dt>Etsy</dt><dd>${authBadge}</dd>
+    <dt>Shop ID</dt><dd>${status.shopId ? escapeHtml(status.shopId) : "unknown"}</dd>
+  </dl>
+
+  <h2>Last sync run</h2>
+  ${
+    lastRun
+      ? `<dl>
+          <dt>When</dt><dd>${formatTimestamp(lastRun.run_at)}</dd>
+          <dt>Receipts seen</dt><dd>${lastRun.receipts_seen}</dd>
+          <dt>Synced</dt><dd>${lastRun.receipts_synced}</dd>
+          <dt>Skipped</dt><dd>${lastRun.receipts_skipped}</dd>
+          <dt>Errors</dt><dd>${lastRun.errors_count}</dd>
+        </dl>`
+      : `<p>No sync run yet.</p>`
+  }
+
+  <h2>Needs review (${status.flagged.length})</h2>
+  ${
+    status.flagged.length > 0
+      ? `<table>
+          <tr><th>Etsy receipt</th><th>Status</th><th>Reason</th><th>When</th></tr>
+          ${flaggedRows}
+        </table>`
+      : `<p>Nothing flagged — all good.</p>`
+  }
+
+  <footer>Auto-refreshes every 30s. Raw JSON at <a href="/health">/health</a>.</footer>
+</body>
+</html>`
+  );
 }
 
 export function startServer(): void {
@@ -113,13 +214,7 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
-        if (url.pathname === "/") {
-          return sendHtml(
-            res,
-            200,
-            `<h1>Etsy → Shopify sync</h1><p><a href="/oauth/etsy/start">Authorize with Etsy</a> | <a href="/health">Health</a></p>`
-          );
-        }
+        if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");
       })
       .catch((error) => {
