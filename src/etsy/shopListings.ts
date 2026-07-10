@@ -137,3 +137,29 @@ export async function createDraftListing(shopId: string, input: DraftListingInpu
   const data = (await res.json()) as CreateListingResponse;
   return { listingId: data.listing_id };
 }
+
+interface UploadListingImageResponse {
+  listing_image_id: number;
+}
+
+/** Uploads one image to a listing. Etsy only accepts JPEG/PNG/GIF — callers must convert other formats first. */
+export async function uploadListingImage(
+  shopId: string,
+  listingId: number,
+  image: { data: Buffer; filename: string },
+  rank: number
+): Promise<{ listingImageId: number }> {
+  const form = new FormData();
+  form.append("image", new Blob([image.data], { type: "image/jpeg" }), image.filename);
+  form.append("rank", String(rank));
+
+  const res = await etsyFetch(`/application/shops/${shopId}/listings/${listingId}/images`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to upload Etsy listing image (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as UploadListingImageResponse;
+  return { listingImageId: data.listing_image_id };
+}

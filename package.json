@@ -13,6 +13,7 @@
     "dry-run": "tsc -p tsconfig.json && node dist/cli/dry-run.js"
   },
   "dependencies": {
+    "sharp": "^0.35.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

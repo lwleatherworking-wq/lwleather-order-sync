@@ -22,8 +22,10 @@ import {
   getSellerTaxonomyOptions,
   getReadinessStateDefinitions,
   createDraftListing,
+  uploadListingImage,
   type DraftListingInput,
 } from "./etsy/shopListings.js";
+import sharp from "sharp";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
 
@@ -746,6 +748,41 @@ async function listToEtsyProductPageHtml(params: {
   return { ...renderPage({ title: `List "${product.title}" to Etsy`, bodyHtml }), status: 200 };
 }
 
+/**
+ * Downloads each Shopify product image and uploads it to the new Etsy draft listing.
+ * Etsy only accepts JPEG/PNG/GIF, but Shopify commonly serves WebP, so every image is
+ * re-encoded to JPEG first. Runs after the listing already exists and is recorded, so a
+ * failure here never risks a duplicate listing — it just leaves that image unattached.
+ */
+async function uploadShopifyImagesToEtsyListing(
+  shopId: string,
+  listingId: number,
+  imageUrls: string[]
+): Promise<{ succeeded: number; failed: number }> {
+  let succeeded = 0;
+  let failed = 0;
+  let rank = 1;
+  for (const imageUrl of imageUrls) {
+    try {
+      const imageRes = await fetch(imageUrl);
+      if (!imageRes.ok) throw new Error(`Failed to download image (${imageRes.status})`);
+      const original = Buffer.from(await imageRes.arrayBuffer());
+      const jpeg = await sharp(original).jpeg({ quality: 90 }).toBuffer();
+      await uploadListingImage(shopId, listingId, { data: jpeg, filename: `image-${rank}.jpg` }, rank);
+      succeeded++;
+    } catch (error) {
+      failed++;
+      logger.error("Failed to upload product image to Etsy listing", {
+        listingId,
+        imageUrl,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    rank++;
+  }
+  return { succeeded, failed };
+}
+
 function handleListToEtsyProductGet(url: URL, res: ServerResponse): Promise<void> {
   const productId = url.searchParams.get("id");
   if (!productId) {
@@ -819,9 +856,19 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
     recordEtsyListingLink(productId, String(listingId));
     logger.info("Created Etsy draft listing from Shopify product", { productId, listingId });
 
+    const product = await getProductDetail(productId);
+    let imageSummary = "No product images found to upload.";
+    if (product && product.imageUrls.length > 0) {
+      const { succeeded, failed } = await uploadShopifyImagesToEtsyListing(shopId, listingId, product.imageUrls);
+      imageSummary =
+        failed === 0
+          ? `${succeeded}/${product.imageUrls.length} product image(s) uploaded.`
+          : `${succeeded}/${product.imageUrls.length} product image(s) uploaded (${failed} failed — check logs).`;
+    }
+
     const { html, headers, status } = await listToEtsyProductPageHtml({
       productId,
-      message: `Draft listing #${listingId} created on Etsy. Add photos and review it there before publishing.`,
+      message: `Draft listing #${listingId} created on Etsy. ${imageSummary} Review it on Etsy before publishing.`,
     });
     sendHtml(res, status, html, headers);
   } catch (error) {

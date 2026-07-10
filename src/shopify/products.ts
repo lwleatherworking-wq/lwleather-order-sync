@@ -81,6 +81,7 @@ export interface ProductDetail {
   price: string;
   sku: string | null;
   totalInventory: number;
+  imageUrls: string[];
 }
 
 const DETAIL_QUERY = /* GraphQL */ `
@@ -90,6 +91,11 @@ const DETAIL_QUERY = /* GraphQL */ `
       title
       descriptionHtml
       totalInventory
+      images(first: 10) {
+        nodes {
+          url
+        }
+      }
       variants(first: 1) {
         nodes {
           sku
@@ -106,6 +112,7 @@ interface GetProductDetailResult {
     title: string;
     descriptionHtml: string;
     totalInventory: number;
+    images: { nodes: Array<{ url: string }> };
     variants: { nodes: Array<{ sku: string | null; price: string }> };
   } | null;
 }
@@ -121,5 +128,6 @@ export async function getProductDetail(id: string): Promise<ProductDetail | null
     price: firstVariant?.price ?? "0.00",
     sku: firstVariant?.sku ?? null,
     totalInventory: data.product.totalInventory,
+    imageUrls: data.product.images.nodes.map((n) => n.url),
   };
 }
