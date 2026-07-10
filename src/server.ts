@@ -128,7 +128,10 @@ export function startServer(): void {
       });
   });
 
-  server.listen(PORT, () => {
+  // Must bind to 0.0.0.0, not the default — Railway's proxy connects from outside
+  // the container's network namespace and can't reach a server listening only on
+  // a loopback/IPv6-only default address.
+  server.listen(PORT, "0.0.0.0", () => {
     logger.info("HTTP server listening", { port: PORT });
   });
 }
