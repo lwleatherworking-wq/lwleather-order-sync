@@ -13,7 +13,8 @@ import { getReceiptById } from "./etsy/receipts.js";
 import { getFlaggedReceipts, markSynced } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
 import { getShopCurrencyCode } from "./shopify/shopInfo.js";
-import { buildOrderInput, createOrder } from "./shopify/orders.js";
+import { buildOrderInput, buildShippingAddress, createOrder } from "./shopify/orders.js";
+import { resolveOrderCustomer } from "./shopify/customers.js";
 import { decrementInventory } from "./shopify/inventory.js";
 import { resolveLineItems } from "./sync/mapping.js";
 import { logger } from "./logger.js";
@@ -128,7 +129,9 @@ async function handleResyncReceipt(url: URL, res: ServerResponse): Promise<void>
   }
 
   const currencyCode = await getShopCurrencyCode();
-  const orderInput = buildOrderInput(receipt, resolved, currencyCode);
+  const shippingAddress = buildShippingAddress(receipt);
+  const customer = await resolveOrderCustomer({ buyerEmail: receipt.buyer_email, shippingAddress });
+  const orderInput = buildOrderInput(receipt, resolved, currencyCode, shippingAddress, customer);
   const result = await createOrder(orderInput);
   if ("userErrors" in result) {
     sendJson(res, 200, { ok: false, userErrors: result.userErrors });

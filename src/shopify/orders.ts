@@ -2,6 +2,33 @@ import { shopifyGraphql } from "./apiClient.js";
 import type { EtsyReceipt } from "../etsy/types.js";
 import { moneyToDecimalString } from "../etsy/types.js";
 import type { ResolvedVariant } from "./variantLookup.js";
+import type { OrderCustomerRef } from "./customers.js";
+
+export interface ShippingAddressInput {
+  address1: string;
+  address2?: string;
+  city?: string;
+  provinceCode?: string;
+  zip?: string;
+  countryCode?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
+/** MailingAddressInput shape (countryCode/provinceCode) used for the order-level shippingAddress. */
+export function buildShippingAddress(receipt: EtsyReceipt): ShippingAddressInput | undefined {
+  if (!receipt.first_line) return undefined;
+  return {
+    address1: receipt.first_line,
+    address2: receipt.second_line ?? undefined,
+    city: receipt.city ?? undefined,
+    provinceCode: receipt.state ?? undefined,
+    zip: receipt.zip ?? undefined,
+    countryCode: receipt.country_iso ?? undefined,
+    firstName: receipt.name?.split(" ").slice(0, -1).join(" ") || receipt.name,
+    lastName: receipt.name?.split(" ").slice(-1).join(" ") || "",
+  };
+}
 
 const MUTATION = /* GraphQL */ `
   mutation CreateOrder($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
@@ -32,40 +59,13 @@ export interface ResolvedLineItem {
 }
 
 /** Maps a fully-resolved Etsy receipt into the Shopify orderCreate input shape. */
-export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[], currencyCode: string) {
-  const firstName = receipt.name?.split(" ").slice(0, -1).join(" ") || receipt.name;
-  const lastName = receipt.name?.split(" ").slice(-1).join(" ") || "";
-
-  // MailingAddressInput (order-level shippingAddress) uses countryCode/provinceCode.
-  const shippingAddress = receipt.first_line
-    ? {
-        address1: receipt.first_line,
-        address2: receipt.second_line ?? undefined,
-        city: receipt.city ?? undefined,
-        provinceCode: receipt.state ?? undefined,
-        zip: receipt.zip ?? undefined,
-        countryCode: receipt.country_iso ?? undefined,
-        firstName,
-        lastName,
-      }
-    : undefined;
-
-  // OrderCreateCustomerAddressInput (customer.toUpsert.addresses) instead uses plain
-  // country/province string fields — a different shape from MailingAddressInput above,
-  // despite representing the same address.
-  const customerAddress = receipt.first_line
-    ? {
-        address1: receipt.first_line,
-        address2: receipt.second_line ?? undefined,
-        city: receipt.city ?? undefined,
-        province: receipt.state ?? undefined,
-        zip: receipt.zip ?? undefined,
-        country: receipt.country_iso ?? undefined,
-        firstName,
-        lastName,
-      }
-    : undefined;
-
+export function buildOrderInput(
+  receipt: EtsyReceipt,
+  lines: ResolvedLineItem[],
+  currencyCode: string,
+  shippingAddress: ShippingAddressInput | undefined,
+  customer: OrderCustomerRef | undefined
+) {
   return {
     email: receipt.buyer_email ?? undefined,
     note: `Synced from Etsy receipt #${receipt.receipt_id}${
@@ -76,20 +76,7 @@ export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[],
     currency: currencyCode,
     financialStatus: "PAID",
     shippingAddress,
-    // Etsy restricts buyer_email to apps with special, separately-approved access, which
-    // this app doesn't have — so it's normally null. Still attach a customer record built
-    // from the recipient name/address on the receipt (always available), rather than
-    // skipping customer creation entirely just because there's no email to key it on.
-    customer: customerAddress
-      ? {
-          toUpsert: {
-            email: receipt.buyer_email ?? undefined,
-            firstName: customerAddress.firstName,
-            lastName: customerAddress.lastName,
-            addresses: [customerAddress],
-          },
-        }
-      : undefined,
+    customer,
     lineItems: lines.map((line) => ({
       variantId: line.variant.variantId,
       sku: line.variant.sku,

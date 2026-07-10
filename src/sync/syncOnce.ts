@@ -2,7 +2,8 @@ import { getEnv } from "../config/env.js";
 import { getShopId } from "../config/shopId.js";
 import { getPaidReceiptsSince } from "../etsy/receipts.js";
 import { getShopCurrencyCode } from "../shopify/shopInfo.js";
-import { buildOrderInput, createOrder } from "../shopify/orders.js";
+import { buildOrderInput, buildShippingAddress, createOrder } from "../shopify/orders.js";
+import { resolveOrderCustomer } from "../shopify/customers.js";
 import { decrementInventory } from "../shopify/inventory.js";
 import { resolveLineItems } from "./mapping.js";
 import { flagUnmatchedSkus, flagError } from "./reviewQueue.js";
@@ -78,14 +79,19 @@ export async function syncOnce(): Promise<SyncRunSummary> {
         continue;
       }
 
-      const orderInput = buildOrderInput(receipt, resolved, currencyCode);
+      const shippingAddress = buildShippingAddress(receipt);
 
       if (DRY_RUN) {
+        // Customer resolution without an email creates a real customer record as a side
+        // effect, so it's skipped here — dry-run must never write anything to Shopify.
+        const orderInput = buildOrderInput(receipt, resolved, currencyCode, shippingAddress, undefined);
         logger.info("[dry-run] would create Shopify order", { etsyReceiptId: receipt.receipt_id, orderInput });
         summary.receiptsSynced += 1;
         continue;
       }
 
+      const customer = await resolveOrderCustomer({ buyerEmail: receipt.buyer_email, shippingAddress });
+      const orderInput = buildOrderInput(receipt, resolved, currencyCode, shippingAddress, customer);
       const result = await createOrder(orderInput);
 
       if ("userErrors" in result) {
