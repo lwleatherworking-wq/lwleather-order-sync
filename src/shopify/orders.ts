@@ -56,13 +56,17 @@ export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[],
     currency: currencyCode,
     financialStatus: "PAID",
     shippingAddress,
-    customer: receipt.buyer_email
+    // Etsy restricts buyer_email to apps with special, separately-approved access, which
+    // this app doesn't have — so it's normally null. Still attach a customer record built
+    // from the recipient name/address on the receipt (always available), rather than
+    // skipping customer creation entirely just because there's no email to key it on.
+    customer: shippingAddress
       ? {
           toUpsert: {
-            email: receipt.buyer_email,
-            firstName: shippingAddress?.firstName,
-            lastName: shippingAddress?.lastName,
-            addresses: shippingAddress ? [shippingAddress] : undefined,
+            email: receipt.buyer_email ?? undefined,
+            firstName: shippingAddress.firstName,
+            lastName: shippingAddress.lastName,
+            addresses: [shippingAddress],
           },
         }
       : undefined,
