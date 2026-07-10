@@ -11,7 +11,8 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
-import { getFlaggedReceipts } from "./db/receiptStore.js";
+import { getReceiptById } from "./etsy/receipts.js";
+import { getFlaggedReceipts, markSynced } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
 import { getPrimaryLocationId } from "./shopify/locations.js";
 import { logger } from "./logger.js";
@@ -105,6 +106,30 @@ function handleHealth(res: ServerResponse): void {
   });
 }
 
+// TEMPORARY, ONE-OFF: mark the 3 legitimate orders created before the read_locations
+// scope fix as already-synced, so re-enabling real syncing doesn't recreate them as
+// duplicates. Remove once run once.
+const KNOWN_GOOD_PAIRS = [
+  { etsyReceiptId: "4092098661", shopifyOrderId: "gid://shopify/Order/7887060304209" },
+  { etsyReceiptId: "4099330116", shopifyOrderId: "gid://shopify/Order/7887060730193" },
+  { etsyReceiptId: "4111842377", shopifyOrderId: "gid://shopify/Order/7887061320017" },
+];
+
+async function handleFixReceipts(res: ServerResponse): Promise<void> {
+  const shopId = getShopId();
+  const results: unknown[] = [];
+  for (const pair of KNOWN_GOOD_PAIRS) {
+    const receipt = await getReceiptById(shopId, pair.etsyReceiptId);
+    markSynced({
+      etsyReceiptId: pair.etsyReceiptId,
+      shopifyOrderId: pair.shopifyOrderId,
+      receiptCreatedTs: receipt.created_timestamp,
+    });
+    results.push({ ...pair, receiptCreatedTs: receipt.created_timestamp });
+  }
+  sendJson(res, 200, { fixed: results });
+}
+
 // TEMPORARY: diagnose why the SQLite DB isn't surviving redeploys. Remove once resolved.
 function handleDebugFs(res: ServerResponse): void {
   const { DB_PATH } = getEnv();
@@ -159,6 +184,7 @@ export function startServer(): void {
         if (url.pathname === "/health") return handleHealth(res);
         if (url.pathname === "/debug/fs") return handleDebugFs(res);
         if (url.pathname === "/debug/location") return handleDebugLocation(res);
+        if (url.pathname === "/debug/fix-receipts") return handleFixReceipts(res);
         if (url.pathname === "/") {
           return sendHtml(
             res,

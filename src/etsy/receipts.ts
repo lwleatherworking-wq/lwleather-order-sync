@@ -36,3 +36,11 @@ export async function getPaidReceiptsSince(
 
   return receipts;
 }
+
+export async function getReceiptById(shopId: string, receiptId: string): Promise<EtsyReceipt> {
+  const res = await etsyFetch(`/application/shops/${shopId}/receipts/${receiptId}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Etsy receipt ${receiptId} (${res.status}): ${await res.text()}`);
+  }
+  return (await res.json()) as EtsyReceipt;
+}
