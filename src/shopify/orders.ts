@@ -33,6 +33,10 @@ export interface ResolvedLineItem {
 
 /** Maps a fully-resolved Etsy receipt into the Shopify orderCreate input shape. */
 export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[], currencyCode: string) {
+  const firstName = receipt.name?.split(" ").slice(0, -1).join(" ") || receipt.name;
+  const lastName = receipt.name?.split(" ").slice(-1).join(" ") || "";
+
+  // MailingAddressInput (order-level shippingAddress) uses countryCode/provinceCode.
   const shippingAddress = receipt.first_line
     ? {
         address1: receipt.first_line,
@@ -41,8 +45,24 @@ export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[],
         provinceCode: receipt.state ?? undefined,
         zip: receipt.zip ?? undefined,
         countryCode: receipt.country_iso ?? undefined,
-        firstName: receipt.name?.split(" ").slice(0, -1).join(" ") || receipt.name,
-        lastName: receipt.name?.split(" ").slice(-1).join(" ") || "",
+        firstName,
+        lastName,
+      }
+    : undefined;
+
+  // OrderCreateCustomerAddressInput (customer.toUpsert.addresses) instead uses plain
+  // country/province string fields — a different shape from MailingAddressInput above,
+  // despite representing the same address.
+  const customerAddress = receipt.first_line
+    ? {
+        address1: receipt.first_line,
+        address2: receipt.second_line ?? undefined,
+        city: receipt.city ?? undefined,
+        province: receipt.state ?? undefined,
+        zip: receipt.zip ?? undefined,
+        country: receipt.country_iso ?? undefined,
+        firstName,
+        lastName,
       }
     : undefined;
 
@@ -60,13 +80,13 @@ export function buildOrderInput(receipt: EtsyReceipt, lines: ResolvedLineItem[],
     // this app doesn't have — so it's normally null. Still attach a customer record built
     // from the recipient name/address on the receipt (always available), rather than
     // skipping customer creation entirely just because there's no email to key it on.
-    customer: shippingAddress
+    customer: customerAddress
       ? {
           toUpsert: {
             email: receipt.buyer_email ?? undefined,
-            firstName: shippingAddress.firstName,
-            lastName: shippingAddress.lastName,
-            addresses: [shippingAddress],
+            firstName: customerAddress.firstName,
+            lastName: customerAddress.lastName,
+            addresses: [customerAddress],
           },
         }
       : undefined,
