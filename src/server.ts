@@ -166,6 +166,18 @@ const SHARED_STYLE = `
     .inline-form input[type="text"] { width: auto; flex: 1; }
     .inline-form button { margin-top: 0; }
     code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    .combobox { position: relative; }
+    .combobox-results {
+      display: none; position: absolute; z-index: 10; top: 100%; left: 0; right: 0;
+      background: white; border: 1px solid #ccc; border-top: none; border-radius: 0 0 6px 6px;
+      max-height: 240px; overflow-y: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+    }
+    .combobox-results.open { display: block; }
+    .combobox-result { padding: 0.45rem 0.6rem; cursor: pointer; font-size: 0.9rem; }
+    .combobox-result:hover { background: #f2f2f2; }
+    .combobox-result.combobox-empty { color: #888; cursor: default; }
+    .combobox-result.combobox-empty:hover { background: none; }
+    .combobox-result mark { background: #fff3b0; color: inherit; padding: 0; border-radius: 2px; }
 `;
 
 /**
@@ -675,11 +687,9 @@ async function listToEtsyProductPageHtml(params: {
   const readinessOptionsHtml = readinessStates
     .map((r) => `<option value="${r.readinessStateDefinitionId}">${escapeHtml(r.label)}</option>`)
     .join("");
-  const taxonomyDatalistHtml = taxonomyOptions.map((t) => `<option value="${escapeHtml(t.fullPath)}">`).join("");
-  const taxonomyMapJson = JSON.stringify(Object.fromEntries(taxonomyOptions.map((t) => [t.fullPath, t.id]))).replace(
-    /</g,
-    "\\u003c"
-  );
+  const taxonomyOptionsJson = JSON.stringify(
+    taxonomyOptions.map((t) => ({ id: t.id, fullPath: t.fullPath }))
+  ).replace(/</g, "\\u003c");
   const whenMadeOptionsHtml = WHEN_MADE_OPTIONS.map((v) => `<option value="${v}">${v.replace(/_/g, "-")}</option>`).join(
     ""
   );
@@ -711,8 +721,10 @@ async function listToEtsyProductPageHtml(params: {
     </div>
     <div class="field">
       <label>Category (Etsy taxonomy)</label>
-      <input type="text" id="taxonomy-search" list="taxonomy-options" placeholder="Type a word to search, e.g. &quot;bags&quot;" autocomplete="off">
-      <datalist id="taxonomy-options">${taxonomyDatalistHtml}</datalist>
+      <div class="combobox" id="taxonomy-combobox">
+        <input type="text" id="taxonomy-search" placeholder="Type a word to search, e.g. &quot;bags&quot;" autocomplete="off">
+        <div class="combobox-results" id="taxonomy-results"></div>
+      </div>
       <input type="hidden" name="taxonomyId" id="taxonomy-id">
       <p class="hint" id="taxonomy-hint">Start typing, then pick a suggestion from the list.</p>
     </div>
@@ -748,25 +760,91 @@ async function listToEtsyProductPageHtml(params: {
   <p><a href="/list-to-etsy">Back to product list</a></p>
   <script>
     (function () {
-      var TAXONOMY_MAP = ${taxonomyMapJson};
+      var TAXONOMY_OPTIONS = ${taxonomyOptionsJson};
+      var MAX_RESULTS = 30;
       var search = document.getElementById("taxonomy-search");
       var hidden = document.getElementById("taxonomy-id");
       var hint = document.getElementById("taxonomy-hint");
-      function sync() {
-        var id = TAXONOMY_MAP[search.value];
-        if (id) {
-          hidden.value = id;
-          hint.textContent = "Selected.";
-        } else {
-          hidden.value = "";
-          hint.textContent = search.value
-            ? "No exact match yet — pick a suggestion from the list."
-            : "Start typing, then pick a suggestion from the list.";
-        }
+      var results = document.getElementById("taxonomy-results");
+
+      function escapeHtml(s) {
+        return s.replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
       }
-      search.addEventListener("input", sync);
+
+      function highlight(text, query) {
+        var idx = text.toLowerCase().indexOf(query.toLowerCase());
+        if (idx === -1) return escapeHtml(text);
+        return (
+          escapeHtml(text.slice(0, idx)) +
+          "<mark>" + escapeHtml(text.slice(idx, idx + query.length)) + "</mark>" +
+          escapeHtml(text.slice(idx + query.length))
+        );
+      }
+
+      function closeResults() {
+        results.innerHTML = "";
+        results.classList.remove("open");
+      }
+
+      function render(query) {
+        var q = query.trim().toLowerCase();
+        if (!q) {
+          closeResults();
+          return;
+        }
+        var matches = TAXONOMY_OPTIONS.filter(function (t) {
+          return t.fullPath.toLowerCase().indexOf(q) !== -1;
+        }).slice(0, MAX_RESULTS);
+
+        if (matches.length === 0) {
+          results.innerHTML = '<div class="combobox-result combobox-empty">No matching categories</div>';
+          results.classList.add("open");
+          return;
+        }
+
+        results.innerHTML = matches
+          .map(function (t) {
+            return (
+              '<div class="combobox-result" data-id="' + t.id + '" data-path="' + escapeHtml(t.fullPath) + '">' +
+              highlight(t.fullPath, q) +
+              "</div>"
+            );
+          })
+          .join("");
+        results.classList.add("open");
+      }
+
+      function select(id, path) {
+        hidden.value = id;
+        search.value = path;
+        hint.textContent = "Selected.";
+        closeResults();
+      }
+
+      search.addEventListener("input", function () {
+        hidden.value = "";
+        hint.textContent = "Start typing, then pick a suggestion from the list.";
+        render(search.value);
+      });
+
+      search.addEventListener("focus", function () {
+        if (search.value.trim()) render(search.value);
+      });
+
+      results.addEventListener("mousedown", function (e) {
+        var item = e.target.closest(".combobox-result");
+        if (!item || !item.dataset.id) return;
+        e.preventDefault();
+        select(item.dataset.id, item.dataset.path);
+      });
+
+      document.addEventListener("click", function (e) {
+        if (!e.target.closest("#taxonomy-combobox")) closeResults();
+      });
+
       search.form.addEventListener("submit", function (e) {
-        sync();
         if (!hidden.value) {
           e.preventDefault();
           hint.textContent = "Please pick a category from the suggestions list before submitting.";
