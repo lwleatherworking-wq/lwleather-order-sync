@@ -117,11 +117,12 @@ orders going forward, not import your whole order history. To pull in older orde
   shipping profile, "who/when made", and "craft supply" are Etsy-only fields you fill
   in on the form since Shopify has no equivalent. Requires the `listings_w` OAuth
   scope — if you connected Etsy before this was added, re-authorize once via
-  `/oauth/etsy/start`. Product images are **not** uploaded automatically; add them on
-  Etsy when you finish editing the draft. Each product tracks which Etsy draft it was
-  sent to, so the picker shows "already listed" instead of a link once one exists —
-  submitting again from that product's form still creates a **separate** new draft
-  (there's no update-in-place).
+  `/oauth/etsy/start`. All of the product's Shopify images (up to 10) are uploaded to
+  the draft automatically, converted to JPEG since Etsy doesn't accept Shopify's WebP
+  files — the success message reports how many uploaded. Each product tracks which
+  Etsy draft it was sent to, so the picker shows "already listed" instead of a link
+  once one exists — submitting again from that product's form still creates a
+  **separate** new draft (there's no update-in-place).
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.
