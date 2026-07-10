@@ -1,4 +1,4 @@
-import { getEnv } from "../config/env.js";
+import { getEffectiveConfig } from "../config/effectiveConfig.js";
 import { getShopId } from "../config/shopId.js";
 import { getPaidReceiptsSince } from "../etsy/receipts.js";
 import { getShopCurrencyCode } from "../shopify/shopInfo.js";
@@ -33,7 +33,7 @@ export async function syncOnce(): Promise<SyncRunSummary> {
     durationMs: 0,
   };
 
-  const { DRY_RUN, BACKFILL_SINCE } = getEnv();
+  const { DRY_RUN, BACKFILL_SINCE } = getEffectiveConfig();
   const shopId = getShopId();
   const storedCheckpoint = getCheckpoint();
   const nowSeconds = Math.floor(Date.now() / 1000);

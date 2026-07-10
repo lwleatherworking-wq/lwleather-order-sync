@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import { getEnv } from "../config/env.js";
+import { requireEtsyCredentials } from "../config/effectiveConfig.js";
 import type { EtsyTokenResponse } from "./types.js";
 
 const AUTHORIZE_URL = "https://www.etsy.com/oauth/connect";
@@ -30,12 +30,12 @@ export function generateState(): string {
 }
 
 export function buildAuthorizeUrl(params: { state: string; codeChallenge: string; redirectUri: string }): string {
-  const { ETSY_CLIENT_ID } = getEnv();
+  const { clientId } = requireEtsyCredentials();
   // Built manually (not via URLSearchParams) so the space in `scope` is encoded as %20,
   // matching Etsy's documented example exactly, rather than URLSearchParams' "+".
   const query = [
     ["response_type", "code"],
-    ["client_id", ETSY_CLIENT_ID],
+    ["client_id", clientId],
     ["redirect_uri", params.redirectUri],
     ["scope", SCOPES],
     ["state", params.state],
@@ -52,10 +52,10 @@ export async function exchangeCodeForTokens(params: {
   codeVerifier: string;
   redirectUri: string;
 }): Promise<EtsyTokenResponse> {
-  const { ETSY_CLIENT_ID } = getEnv();
+  const { clientId } = requireEtsyCredentials();
   const body = new URLSearchParams({
     grant_type: "authorization_code",
-    client_id: ETSY_CLIENT_ID,
+    client_id: clientId,
     redirect_uri: params.redirectUri,
     code: params.code,
     code_verifier: params.codeVerifier,
@@ -72,10 +72,10 @@ export async function exchangeCodeForTokens(params: {
 }
 
 export async function refreshEtsyTokens(refreshToken: string): Promise<EtsyTokenResponse> {
-  const { ETSY_CLIENT_ID } = getEnv();
+  const { clientId } = requireEtsyCredentials();
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    client_id: ETSY_CLIENT_ID,
+    client_id: clientId,
     refresh_token: refreshToken,
   });
   const res = await fetch(TOKEN_URL, {

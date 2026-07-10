@@ -1,4 +1,4 @@
-import { getEnv } from "../config/env.js";
+import { requireEtsyCredentials } from "../config/effectiveConfig.js";
 import { getEtsyTokens, saveEtsyTokens } from "../db/tokenStore.js";
 import { refreshEtsyTokens } from "./oauthClient.js";
 import { logger } from "../logger.js";
@@ -28,8 +28,8 @@ async function getValidAccessToken(): Promise<string> {
 
 /** Every Etsy v3 request needs x-api-key: "<keystring>:<shared_secret>" plus a bearer token. */
 async function apiKeyHeader(): Promise<string> {
-  const { ETSY_CLIENT_ID, ETSY_CLIENT_SECRET } = getEnv();
-  return `${ETSY_CLIENT_ID}:${ETSY_CLIENT_SECRET}`;
+  const { clientId, clientSecret } = requireEtsyCredentials();
+  return `${clientId}:${clientSecret}`;
 }
 
 export async function etsyFetch(path: string, init: RequestInit = {}, attempt = 0): Promise<Response> {

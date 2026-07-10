@@ -1,4 +1,5 @@
 import { getEnv } from "../config/env.js";
+import { requireShopifyCredentials } from "../config/effectiveConfig.js";
 import { logger } from "../logger.js";
 
 interface GraphqlResponse<T> {
@@ -23,6 +24,11 @@ interface ClientCredentialsResponse {
 let cachedToken: { accessToken: string; expiresAt: number } | undefined;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
+/** Forces the next request to re-authenticate — call after Shopify credentials change via /setup. */
+export function clearCachedShopifyToken(): void {
+  cachedToken = undefined;
+}
+
 /**
  * Custom apps created via Shopify's Dev Dashboard no longer expose a static Admin API
  * access token in the UI. Instead, the app's client id/secret are exchanged for a
@@ -34,14 +40,14 @@ async function getValidShopifyAccessToken(): Promise<string> {
     return cachedToken.accessToken;
   }
 
-  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET } = getEnv();
-  const res = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`, {
+  const { storeDomain, clientId, clientSecret } = requireShopifyCredentials();
+  const res = await fetch(`https://${storeDomain}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
-      client_id: SHOPIFY_CLIENT_ID,
-      client_secret: SHOPIFY_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
     }),
   });
   if (!res.ok) {
@@ -62,8 +68,9 @@ export async function shopifyGraphql<T>(
   variables?: Record<string, unknown>,
   attempt = 0
 ): Promise<T> {
-  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_API_VERSION } = getEnv();
-  const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+  const { SHOPIFY_API_VERSION } = getEnv();
+  const { storeDomain } = requireShopifyCredentials();
+  const url = `https://${storeDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
   const accessToken = await getValidShopifyAccessToken();
 
   const res = await fetch(url, {

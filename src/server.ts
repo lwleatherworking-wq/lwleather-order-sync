@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { getEnv, getEtsyRedirectUri } from "./config/env.js";
+import { getEnv } from "./config/env.js";
+import { getEffectiveConfig, getEtsyRedirectUri, setConfigOverride, type OverridableKey } from "./config/effectiveConfig.js";
 import { saveDiscoveredShopId, getShopId } from "./config/shopId.js";
 import {
   buildAuthorizeUrl,
@@ -9,6 +10,7 @@ import {
 } from "./etsy/oauthClient.js";
 import { saveEtsyTokens, getEtsyTokens } from "./db/tokenStore.js";
 import { fetchEtsySelf } from "./etsy/apiClient.js";
+import { clearCachedShopifyToken } from "./shopify/apiClient.js";
 import { getFlaggedReceipts } from "./db/receiptStore.js";
 import { getDb } from "./db/client.js";
 import { logger } from "./logger.js";
@@ -143,7 +145,12 @@ function handleStatusPage(res: ServerResponse): void {
     )
     .join("");
 
-  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID } = getEnv();
+  const { SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID } = getEffectiveConfig();
+  // Both may be unset before /setup is completed — the page must still render (just not
+  // yet embeddable/App-Bridge-enabled) rather than crash.
+  const appBridgeTag = SHOPIFY_CLIENT_ID
+    ? `<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${escapeHtml(SHOPIFY_CLIENT_ID)}"></script>`
+    : "";
 
   sendHtml(
     res,
@@ -154,7 +161,7 @@ function handleStatusPage(res: ServerResponse): void {
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="30">
   <title>Etsy → Shopify sync status</title>
-  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${escapeHtml(SHOPIFY_CLIENT_ID)}"></script>
+  ${appBridgeTag}
   <style>
     body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
     h1 { font-size: 1.4rem; }
@@ -171,6 +178,7 @@ function handleStatusPage(res: ServerResponse): void {
 </head>
 <body>
   <h1>Etsy → Shopify order sync</h1>
+  <nav><a href="/">Status</a> · <a href="/setup">Setup</a></nav>
 
   <dl>
     <dt>Etsy</dt><dd>${authBadge}</dd>
@@ -205,8 +213,168 @@ function handleStatusPage(res: ServerResponse): void {
 </html>`,
     // Required for Shopify to allow embedding this page inside Admin: scoped to this
     // specific shop rather than a wildcard, since a wildcard would let any shop iframe it.
-    { "Content-Security-Policy": `frame-ancestors https://${SHOPIFY_STORE_DOMAIN} https://admin.shopify.com;` }
+    // Before the store domain is configured, there's no shop to scope to yet, so framing
+    // just isn't allowed until then.
+    SHOPIFY_STORE_DOMAIN
+      ? { "Content-Security-Policy": `frame-ancestors https://${SHOPIFY_STORE_DOMAIN} https://admin.shopify.com;` }
+      : undefined
   );
+}
+
+interface SetupField {
+  key: OverridableKey;
+  label: string;
+  type: "text" | "password" | "number" | "checkbox" | "date";
+  help?: string;
+}
+
+const SETUP_FIELDS: SetupField[] = [
+  { key: "ETSY_CLIENT_ID", label: "Etsy Client ID (keystring)", type: "text" },
+  { key: "ETSY_CLIENT_SECRET", label: "Etsy Client Secret", type: "password" },
+  { key: "SHOPIFY_STORE_DOMAIN", label: "Shopify Store Domain", type: "text", help: "e.g. your-shop.myshopify.com" },
+  { key: "SHOPIFY_CLIENT_ID", label: "Shopify Client ID", type: "text" },
+  { key: "SHOPIFY_CLIENT_SECRET", label: "Shopify Client Secret", type: "password" },
+  {
+    key: "PUBLIC_BASE_URL",
+    label: "Public Base URL",
+    type: "text",
+    help: "This service's own public HTTPS URL, e.g. https://your-app.up.railway.app",
+  },
+  { key: "SYNC_INTERVAL_MINUTES", label: "Sync interval (minutes)", type: "number" },
+  { key: "DRY_RUN", label: "Dry run (log only, no real Shopify writes)", type: "checkbox" },
+  {
+    key: "BACKFILL_SINCE",
+    label: "Backfill since (date)",
+    type: "date",
+    help: "One-time historical import start date. Remove/clear it again once it's run once.",
+  },
+];
+
+function readRequestBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
+
+function renderSetupField(field: SetupField, config: ReturnType<typeof getEffectiveConfig>): string {
+  const currentValue = config[field.key as keyof typeof config];
+
+  if (field.type === "checkbox") {
+    return `<div class="field">
+      <label><input type="checkbox" name="${field.key}" ${currentValue ? "checked" : ""}> ${escapeHtml(field.label)}</label>
+    </div>`;
+  }
+
+  if (field.type === "password") {
+    const status = currentValue ? "currently set" : "not set";
+    return `<div class="field">
+      <label>${escapeHtml(field.label)} <span class="hint">(${status} — leave blank to keep unchanged)</span></label>
+      <input type="password" name="${field.key}" placeholder="•••••••• (${status})">
+    </div>`;
+  }
+
+  return `<div class="field">
+    <label>${escapeHtml(field.label)}</label>
+    <input type="${field.type}" name="${field.key}" value="${escapeHtml(currentValue ? String(currentValue) : "")}">
+    ${field.help ? `<p class="hint">${escapeHtml(field.help)}</p>` : ""}
+  </div>`;
+}
+
+function setupPageHtml(params: { message?: string; messageIsError?: boolean }): string {
+  const config = getEffectiveConfig();
+  const { SETUP_PASSWORD } = getEnv();
+  const fieldsHtml = SETUP_FIELDS.map((f) => renderSetupField(f, config)).join("\n");
+
+  const banner = params.message
+    ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
+    : "";
+
+  const passwordWarning = !SETUP_PASSWORD
+    ? `<p class="banner error">SETUP_PASSWORD is not set as an environment variable — this form can't save changes until it is.</p>`
+    : "";
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Etsy → Shopify sync setup</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    nav { margin-bottom: 1.5rem; }
+    .field { margin-bottom: 1rem; }
+    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+    input[type="text"], input[type="password"], input[type="number"], input[type="date"] {
+      width: 100%; padding: 0.4rem 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;
+    }
+    .hint { color: #666; font-size: 0.8rem; margin: 0.2rem 0 0; }
+    .banner { padding: 0.6rem 0.8rem; border-radius: 6px; }
+    .banner.success { background: #d1f7dd; color: #12603a; }
+    .banner.error { background: #fde2e2; color: #8a1f1f; }
+    button { margin-top: 1rem; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; background: #1a1a1a; color: white; font-size: 0.95rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Setup</h1>
+  <nav><a href="/">Status</a> · <a href="/setup">Setup</a></nav>
+
+  ${banner}
+  ${passwordWarning}
+
+  <form method="POST" action="/setup">
+    ${fieldsHtml}
+    <div class="field">
+      <label>Setup password</label>
+      <input type="password" name="password" required>
+    </div>
+    <button type="submit">Save</button>
+  </form>
+</body>
+</html>`;
+}
+
+function handleSetupGet(res: ServerResponse): void {
+  sendHtml(res, 200, setupPageHtml({}));
+}
+
+async function handleSetupPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const { SETUP_PASSWORD } = getEnv();
+
+  if (!SETUP_PASSWORD) {
+    sendHtml(res, 403, setupPageHtml({ message: "SETUP_PASSWORD is not configured — set it as an env var first.", messageIsError: true }));
+    return;
+  }
+  if (params.get("password") !== SETUP_PASSWORD) {
+    sendHtml(res, 401, setupPageHtml({ message: "Incorrect setup password.", messageIsError: true }));
+    return;
+  }
+
+  let shopifyCredentialsChanged = false;
+  for (const field of SETUP_FIELDS) {
+    if (field.type === "checkbox") {
+      setConfigOverride(field.key, params.has(field.key) ? "true" : "false");
+      continue;
+    }
+    const value = params.get(field.key);
+    if (value) {
+      setConfigOverride(field.key, value);
+      if (field.key === "SHOPIFY_STORE_DOMAIN" || field.key === "SHOPIFY_CLIENT_ID" || field.key === "SHOPIFY_CLIENT_SECRET") {
+        shopifyCredentialsChanged = true;
+      }
+    }
+  }
+
+  if (shopifyCredentialsChanged) {
+    clearCachedShopifyToken();
+  }
+
+  logger.info("Settings updated via /setup");
+  sendHtml(res, 200, setupPageHtml({ message: "Settings saved." }));
 }
 
 export function startServer(): void {
@@ -220,6 +388,8 @@ export function startServer(): void {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
         if (url.pathname === "/health") return handleHealth(res);
+        if (url.pathname === "/setup" && req.method === "POST") return handleSetupPost(req, res);
+        if (url.pathname === "/setup") return handleSetupGet(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");
       })

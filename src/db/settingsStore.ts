@@ -16,3 +16,8 @@ export function setSetting(key: string, value: string): void {
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   ).run(key, value);
 }
+
+export function deleteSetting(key: string): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM checkpoint WHERE key = ?`).run(key);
+}
