@@ -708,17 +708,44 @@ async function listToEtsyPageHtml(): Promise<{ html: string; headers?: Record<st
     loadError = error instanceof Error ? error.message : "Failed to load Shopify products.";
   }
 
+  // Active Etsy listing SKUs, so each Shopify product can show whether a matching listing
+  // already exists on Etsy — distinct from this app's own "already sent as a draft" status,
+  // since a matching active listing could exist from before this app was ever used.
+  let etsySkuSet: Set<string> | undefined;
+  let etsySkusError: string | undefined;
+  try {
+    etsySkuSet = new Set((await listEtsySkus(getShopId())).map((s) => s.sku));
+  } catch (error) {
+    etsySkusError =
+      error instanceof Error
+        ? error.message
+        : "Could not load Etsy listings. If this app was authorized before listings_r was added, re-authorize via /oauth/etsy/start.";
+  }
+
   const rows = products
     .map((p) => {
       const linkedListingId = getEtsyListingLink(p.id);
       const statusCell = linkedListingId
         ? `<a href="https://www.etsy.com/your/shops/me/tools/listings/${escapeHtml(linkedListingId)}" target="_blank" rel="noopener">Etsy draft #${escapeHtml(linkedListingId)}</a>`
         : `<a href="/list-to-etsy/product?id=${encodeURIComponent(p.id)}">List to Etsy</a>`;
+
+      let matchCell: string;
+      if (!p.sku) {
+        matchCell = "—";
+      } else if (!etsySkuSet) {
+        matchCell = `<span class="hint">Unknown</span>`;
+      } else if (etsySkuSet.has(p.sku)) {
+        matchCell = `<span class="badge ok">On Etsy</span>`;
+      } else {
+        matchCell = `<span class="badge bad">Not on Etsy</span>`;
+      }
+
       return `<tr>
         <td>${p.imageUrl ? `<img src="${escapeHtml(p.imageUrl)}" alt="" width="48" height="48" style="object-fit:cover;border-radius:4px;">` : ""}</td>
         <td>${escapeHtml(p.title)}</td>
         <td>${escapeHtml(p.sku ?? "—")}</td>
         <td>${escapeHtml(p.price)}</td>
+        <td>${matchCell}</td>
         <td>${statusCell}</td>
       </tr>`;
     })
@@ -731,11 +758,12 @@ async function listToEtsyPageHtml(): Promise<{ html: string; headers?: Record<st
   made) are filled in per-product on the next screen before anything is created.</p>
 
   ${loadError ? `<p class="banner error">${escapeHtml(loadError)}</p>` : ""}
+  ${etsySkusError ? `<p class="banner error">${escapeHtml(etsySkusError)}</p>` : ""}
 
   ${
     products.length > 0
       ? `<table>
-          <tr><th></th><th>Product</th><th>SKU</th><th>Price</th><th></th></tr>
+          <tr><th></th><th>Product</th><th>SKU</th><th>Price</th><th>Etsy listing</th><th></th></tr>
           ${rows}
         </table>`
       : !loadError
