@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { getEnv } from "./config/env.js";
 import { getEffectiveConfig, getEtsyRedirectUri, setConfigOverride, type OverridableKey } from "./config/effectiveConfig.js";
 import { saveDiscoveredShopId, getShopId } from "./config/shopId.js";
@@ -46,6 +48,17 @@ function sendHtml(res: ServerResponse, status: number, html: string, extraHeader
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body, null, 2));
+}
+
+/** Serves the shop logo used as a faint background watermark behind the nav on every page. */
+async function handleLogoGet(res: ServerResponse): Promise<void> {
+  try {
+    const data = await readFile(path.join(process.cwd(), "assets", "logo.jpg"));
+    res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=86400" });
+    res.end(data);
+  } catch {
+    res.writeHead(404).end("Not found");
+  }
 }
 
 function handleOauthStart(res: ServerResponse): void {
@@ -163,8 +176,18 @@ const SHARED_STYLE = `
     body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
     h1 { font-size: 1.4rem; }
     h2 { font-size: 1.05rem; margin-top: 2rem; }
-    nav.in-page { margin-bottom: 1.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    nav.in-page {
+      position: relative; margin-bottom: 1.5rem; padding: 0.4rem 0;
+      display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    }
     nav.in-page .spacer { flex: 1; }
+    nav.in-page::before, s-app-nav::before {
+      content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+      background-image: url("/assets/logo.jpg");
+      background-repeat: no-repeat; background-position: center; background-size: contain;
+      opacity: 0.5;
+    }
+    s-app-nav { position: relative; }
     #theme-toggle {
       margin-top: 0; padding: 0.25rem 0.6rem; border: 1px solid var(--input-border); border-radius: 6px;
       background: var(--bg); color: var(--fg); font-size: 0.9rem; cursor: pointer;
@@ -1554,6 +1577,7 @@ export function startServer(): void {
       .then(async () => {
         if (url.pathname === "/oauth/etsy/start") return handleOauthStart(res);
         if (url.pathname === "/oauth/etsy/callback") return handleOauthCallback(url, res);
+        if (url.pathname === "/assets/logo.jpg") return handleLogoGet(res);
         if (url.pathname === "/health") return handleHealth(res);
         if (url.pathname === "/setup" && req.method === "POST") return handleSetupPost(req, res);
         if (url.pathname === "/setup") return handleSetupGet(res);
