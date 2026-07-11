@@ -16,7 +16,7 @@ import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
 import { getEtsyListingLink, recordEtsyListingLink } from "./db/etsyListingLinkStore.js";
-import { listProducts, getProductDetail } from "./shopify/products.js";
+import { listProducts, getProductDetail, type ProductDetail } from "./shopify/products.js";
 import {
   getShippingProfiles,
   getSellerTaxonomyOptions,
@@ -24,7 +24,10 @@ import {
   createDraftListing,
   uploadListingImage,
   setListingSku,
+  setListingVariations,
+  getVariationProperties,
   type DraftListingInput,
+  type VariationProductInput,
 } from "./etsy/shopListings.js";
 import sharp from "sharp";
 import { getDb } from "./db/client.js";
@@ -848,6 +851,51 @@ async function listToEtsyProductPageHtml(params: {
     ""
   );
 
+  const hasVariations = product.variants.length > 1;
+  const productOptionsJson = JSON.stringify(product.options).replace(/</g, "\\u003c");
+
+  const flatFieldsHtml = `
+    <div class="field">
+      <label>Price (GBP)</label>
+      <input type="number" name="price" step="0.01" min="0.01" value="${escapeHtml(product.price)}" required>
+    </div>
+    <div class="field">
+      <label>Quantity</label>
+      <input type="number" name="quantity" step="1" min="1" value="${product.totalInventory > 0 ? product.totalInventory : 1}" required>
+    </div>
+    <div class="field">
+      <label>SKU</label>
+      <input type="text" name="etsySku" value="${escapeHtml(product.sku ?? "")}">
+      <p class="hint">Pushed onto the new Etsy listing after it's created, so it already matches
+      this Shopify product's SKU. Leave blank to skip and set it manually on Etsy later.</p>
+    </div>`;
+
+  const variantRowsHtml = product.variants
+    .map(
+      (v) =>
+        `<tr>
+          <td><code>${escapeHtml(v.sku ?? "—")}</code></td>
+          <td>${escapeHtml(v.selectedOptions.map((o) => `${o.name}: ${o.value}`).join(", "))}</td>
+          <td>${escapeHtml(v.price)}</td>
+          <td>${v.inventoryQuantity}</td>
+        </tr>`
+    )
+    .join("");
+
+  const variationsFieldHtml = `
+    <div class="field">
+      <label>Variations (${product.variants.length})</label>
+      <p class="hint">Pick a category above first, then map each Shopify option to an Etsy
+      property. Typed values that match one of Etsy's existing options for that property are used
+      directly; anything else is sent as custom text.</p>
+      <div id="variations-mapping"><p class="hint">Pick a category above to load Etsy's available properties for it.</p></div>
+      <table>
+        <tr><th>SKU</th><th>Options</th><th>Price</th><th>Qty</th></tr>
+        ${variantRowsHtml}
+      </table>
+      <input type="hidden" name="variationMapping" id="variation-mapping-input">
+    </div>`;
+
   const bodyHtml = `
   <h1>List "${escapeHtml(product.title)}" to Etsy</h1>
   ${banner}
@@ -862,20 +910,7 @@ async function listToEtsyProductPageHtml(params: {
       <label>Description</label>
       <textarea name="description" rows="8" required>${escapeHtml(stripHtml(product.descriptionHtml))}</textarea>
     </div>
-    <div class="field">
-      <label>Price (GBP)</label>
-      <input type="number" name="price" step="0.01" min="0.01" value="${escapeHtml(product.price)}" required>
-    </div>
-    <div class="field">
-      <label>Quantity</label>
-      <input type="number" name="quantity" step="1" min="1" value="${product.totalInventory > 0 ? product.totalInventory : 1}" required>
-    </div>
-    <div class="field">
-      <label>SKU</label>
-      <input type="text" name="etsySku" value="${escapeHtml(product.sku ?? "")}">
-      <p class="hint">Pushed onto the new Etsy listing after it's created, so it already matches
-      this Shopify product's SKU. Leave blank to skip and set it manually on Etsy later.</p>
-    </div>
+    ${hasVariations ? "" : flatFieldsHtml}
     <div class="field">
       <label>Category (Etsy taxonomy)</label>
       <div class="combobox" id="taxonomy-combobox">
@@ -885,6 +920,7 @@ async function listToEtsyProductPageHtml(params: {
       <input type="hidden" name="taxonomyId" id="taxonomy-id">
       <p class="hint" id="taxonomy-hint">Start typing, then pick a suggestion from the list.</p>
     </div>
+    ${hasVariations ? variationsFieldHtml : ""}
     <div class="field">
       <label>Shipping profile</label>
       ${
@@ -978,6 +1014,7 @@ async function listToEtsyProductPageHtml(params: {
         search.value = path;
         hint.textContent = "Selected.";
         closeResults();
+        document.dispatchEvent(new CustomEvent("taxonomy-selected", { detail: { taxonomyId: id } }));
       }
 
       search.addEventListener("input", function () {
@@ -1009,9 +1046,125 @@ async function listToEtsyProductPageHtml(params: {
         }
       });
     })();
-  </script>`;
+  </script>
+  ${hasVariations ? variationsMappingScript(productOptionsJson) : ""}`;
 
   return { ...renderPage({ title: `List "${product.title}" to Etsy`, bodyHtml }), status: 200 };
+}
+
+/** Client-side mapping UI: lets the user assign each Shopify option (e.g. Size) to one of the
+ * Etsy properties available for the chosen category, and each value to one of that property's
+ * existing options (or custom text), then serializes the mapping into a hidden field on submit. */
+function variationsMappingScript(productOptionsJson: string): string {
+  return `
+  <script>
+    (function () {
+      var PRODUCT_OPTIONS = ${productOptionsJson};
+      var mappingDiv = document.getElementById("variations-mapping");
+      var mappingInput = document.getElementById("variation-mapping-input");
+      var form = mappingInput ? mappingInput.form : null;
+      var lastProperties = [];
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function populateValueDatalist(optionIndex, possibleValues) {
+        var datalist = document.getElementById("etsy-values-" + optionIndex);
+        if (!datalist) return;
+        datalist.innerHTML = possibleValues.map(function (v) { return '<option value="' + escapeHtml(v.name) + '">'; }).join("");
+      }
+
+      function render(properties) {
+        lastProperties = properties;
+        if (!PRODUCT_OPTIONS || PRODUCT_OPTIONS.length === 0) {
+          mappingDiv.innerHTML = "";
+          return;
+        }
+        var propertyOptionsHtml =
+          '<option value="">Don\\'t map (skip this option)</option>' +
+          properties.map(function (p, i) { return '<option value="' + i + '">' + escapeHtml(p.displayName) + '</option>'; }).join("");
+
+        mappingDiv.innerHTML = PRODUCT_OPTIONS.map(function (opt, optIndex) {
+          var valuesHtml = opt.values
+            .map(function (val, valIndex) {
+              return (
+                '<div class="field">' +
+                '<label>' + escapeHtml(val) + '</label>' +
+                '<input type="text" class="variation-value-input" data-option-index="' + optIndex + '" data-value-index="' + valIndex + '" value="' + escapeHtml(val) + '" list="etsy-values-' + optIndex + '">' +
+                '</div>'
+              );
+            })
+            .join("");
+          return (
+            '<div class="variation-option-row" data-option-index="' + optIndex + '">' +
+            '<div class="field"><label>' + escapeHtml(opt.name) + ' maps to</label>' +
+            '<select class="variation-property-select" data-option-index="' + optIndex + '">' + propertyOptionsHtml + '</select></div>' +
+            '<datalist id="etsy-values-' + optIndex + '"></datalist>' +
+            valuesHtml +
+            '</div>'
+          );
+        }).join("");
+
+        var selects = mappingDiv.querySelectorAll(".variation-property-select");
+        for (var i = 0; i < selects.length; i++) {
+          selects[i].addEventListener("change", function (e) {
+            var optIndex = e.target.dataset.optionIndex;
+            var propIdx = e.target.value;
+            var possibleValues = propIdx !== "" ? lastProperties[Number(propIdx)].possibleValues : [];
+            populateValueDatalist(optIndex, possibleValues);
+          });
+        }
+      }
+
+      function fetchProperties(taxonomyId) {
+        if (!taxonomyId) return;
+        mappingDiv.innerHTML = '<p class="hint">Loading Etsy properties…</p>';
+        fetch("/list-to-etsy/etsy-properties?taxonomyId=" + encodeURIComponent(taxonomyId))
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data && data.properties) render(data.properties);
+            else mappingDiv.innerHTML = '<p class="banner error">' + escapeHtml((data && data.error) || "Could not load Etsy properties.") + '</p>';
+          })
+          .catch(function () {
+            mappingDiv.innerHTML = '<p class="banner error">Could not load Etsy properties for this category.</p>';
+          });
+      }
+
+      document.addEventListener("taxonomy-selected", function (e) {
+        fetchProperties(e.detail.taxonomyId);
+      });
+
+      if (form) {
+        form.addEventListener("submit", function () {
+          var mapping = { options: [] };
+          PRODUCT_OPTIONS.forEach(function (opt, optIndex) {
+            var propSelect = mappingDiv.querySelector('.variation-property-select[data-option-index="' + optIndex + '"]');
+            var propIdx = propSelect ? propSelect.value : "";
+            var etsyPropertyId = null;
+            var etsyPropertyName = null;
+            var possibleValues = [];
+            if (propIdx !== "") {
+              var prop = lastProperties[Number(propIdx)];
+              etsyPropertyId = prop.propertyId;
+              etsyPropertyName = prop.displayName;
+              possibleValues = prop.possibleValues;
+            }
+            var values = opt.values.map(function (val, valIndex) {
+              var input = mappingDiv.querySelector('.variation-value-input[data-option-index="' + optIndex + '"][data-value-index="' + valIndex + '"]');
+              var text = input ? input.value.trim() : val;
+              var match = possibleValues.filter(function (pv) { return pv.name.toLowerCase() === text.toLowerCase(); })[0];
+              return { shopifyValue: val, text: text, etsyValueId: match && match.valueId != null ? match.valueId : null };
+            });
+            mapping.options.push({ shopifyName: opt.name, etsyPropertyId: etsyPropertyId, etsyPropertyName: etsyPropertyName, values: values });
+          });
+          mappingInput.value = JSON.stringify(mapping);
+        });
+      }
+    })();
+  </script>`;
 }
 
 /**
@@ -1049,6 +1202,66 @@ async function uploadShopifyImagesToEtsyListing(
   return { succeeded, failed };
 }
 
+interface VariationMappingValue {
+  shopifyValue: string;
+  text: string;
+  etsyValueId: number | null;
+}
+
+interface VariationMappingOption {
+  shopifyName: string;
+  etsyPropertyId: number | null;
+  etsyPropertyName: string | null;
+  values: VariationMappingValue[];
+}
+
+interface VariationMappingPayload {
+  options: VariationMappingOption[];
+}
+
+/** Turns the submitted per-option mapping into one Etsy inventory "product" entry per Shopify variant. */
+function buildVariationProducts(product: ProductDetail, mapping: VariationMappingPayload): VariationProductInput[] {
+  return product.variants.map((variant) => {
+    const propertyValues: VariationProductInput["propertyValues"] = [];
+    for (const optionMapping of mapping.options) {
+      if (!optionMapping.etsyPropertyId || !optionMapping.etsyPropertyName) continue;
+      const selected = variant.selectedOptions.find((o) => o.name === optionMapping.shopifyName);
+      if (!selected) continue;
+      const valueMapping = optionMapping.values.find((v) => v.shopifyValue === selected.value);
+      const text = valueMapping?.text?.trim() || selected.value;
+      const valueIds = valueMapping?.etsyValueId != null ? [valueMapping.etsyValueId] : [];
+      propertyValues.push({
+        propertyId: optionMapping.etsyPropertyId,
+        propertyName: optionMapping.etsyPropertyName,
+        valueIds,
+        values: [text],
+      });
+    }
+    return {
+      sku: variant.sku,
+      price: Number(variant.price),
+      quantity: Math.max(variant.inventoryQuantity, 0),
+      propertyValues,
+    };
+  });
+}
+
+/** JSON endpoint the product form's client-side JS calls once a category is picked, to populate
+ * the variation-mapping controls with that category's supported properties (e.g. Size, Color). */
+async function handleEtsyPropertiesGet(url: URL, res: ServerResponse): Promise<void> {
+  const taxonomyId = Number(url.searchParams.get("taxonomyId"));
+  if (!Number.isFinite(taxonomyId) || taxonomyId <= 0) {
+    sendJson(res, 400, { error: "Missing or invalid taxonomyId" });
+    return;
+  }
+  try {
+    const properties = await getVariationProperties(taxonomyId);
+    sendJson(res, 200, { properties });
+  } catch (error) {
+    sendJson(res, 502, { error: error instanceof Error ? error.message : "Failed to fetch Etsy properties" });
+  }
+}
+
 function handleListToEtsyProductGet(url: URL, res: ServerResponse): Promise<void> {
   const productId = url.searchParams.get("id");
   if (!productId) {
@@ -1068,10 +1281,15 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   const body = await readRequestBody(req);
   const params = new URLSearchParams(body);
 
+  const product = await getProductDetail(productId);
+  if (!product) {
+    sendHtml(res, 404, "<h1>Product not found</h1>");
+    return;
+  }
+  const hasVariations = product.variants.length > 1;
+
   const title = params.get("title")?.trim();
   const description = params.get("description")?.trim();
-  const price = Number(params.get("price"));
-  const quantity = Number(params.get("quantity"));
   const taxonomyId = Number(params.get("taxonomyId"));
   const whoMade = params.get("whoMade") as DraftListingInput["whoMade"] | null;
   const whenMade = params.get("whenMade");
@@ -1079,6 +1297,18 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   const readinessStateId = Number(params.get("readinessStateId"));
   const isSupply = params.has("isSupply");
   const etsySku = params.get("etsySku")?.trim();
+
+  // For a multi-variant product, price/quantity aren't collected as flat form fields — Etsy's
+  // listing-creation call still needs *some* initial values, so the minimum variant price and
+  // total variant quantity are used, then immediately overwritten per-variant via
+  // setListingVariations() once the listing exists.
+  let price = Number(params.get("price"));
+  let quantity = Number(params.get("quantity"));
+  if (hasVariations) {
+    const variantPrices = product.variants.map((v) => Number(v.price)).filter(Number.isFinite);
+    price = variantPrices.length > 0 ? Math.min(...variantPrices) : 0.01;
+    quantity = product.variants.reduce((sum, v) => sum + Math.max(v.inventoryQuantity, 0), 0) || 1;
+  }
 
   if (
     !title ||
@@ -1124,7 +1354,22 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
     logger.info("Created Etsy draft listing from Shopify product", { productId, listingId });
 
     let skuSummary = "";
-    if (etsySku) {
+    if (hasVariations) {
+      try {
+        const mappingRaw = params.get("variationMapping");
+        const mapping: VariationMappingPayload = mappingRaw ? JSON.parse(mappingRaw) : { options: [] };
+        const variationProducts = buildVariationProducts(product, mapping);
+        await setListingVariations(listingId, variationProducts, readinessStateId);
+        skuSummary = ` ${variationProducts.length} variation(s) pushed to Etsy.`;
+      } catch (error) {
+        logger.error("Failed to push variations to new Etsy listing", {
+          productId,
+          listingId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        skuSummary = ` Couldn't push variations — check logs and set them manually on Etsy.`;
+      }
+    } else if (etsySku) {
       try {
         await setListingSku(listingId, etsySku);
         skuSummary = ` SKU "${etsySku}" set on the new listing.`;
@@ -1139,9 +1384,8 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
       }
     }
 
-    const product = await getProductDetail(productId);
     let imageSummary = "No product images found to upload.";
-    if (product && product.imageUrls.length > 0) {
+    if (product.imageUrls.length > 0) {
       const { succeeded, failed } = await uploadShopifyImagesToEtsyListing(shopId, listingId, product.imageUrls);
       imageSummary =
         failed === 0
@@ -1317,6 +1561,7 @@ export function startServer(): void {
         if (url.pathname === "/sku-linking") return handleSkuLinkingGet(res);
         if (url.pathname === "/list-to-etsy/product" && req.method === "POST") return handleListToEtsyProductPost(url, req, res);
         if (url.pathname === "/list-to-etsy/product") return handleListToEtsyProductGet(url, res);
+        if (url.pathname === "/list-to-etsy/etsy-properties") return handleEtsyPropertiesGet(url, res);
         if (url.pathname === "/list-to-etsy") return handleListToEtsyGet(res);
         if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);

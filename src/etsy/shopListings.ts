@@ -92,6 +92,45 @@ export async function getSellerTaxonomyOptions(): Promise<TaxonomyOption[]> {
   return options;
 }
 
+export interface VariationPropertyValue {
+  valueId: number | null;
+  name: string;
+}
+
+export interface VariationProperty {
+  propertyId: number;
+  name: string;
+  displayName: string;
+  possibleValues: VariationPropertyValue[];
+}
+
+interface TaxonomyNodePropertiesResponse {
+  results: Array<{
+    property_id: number;
+    name: string;
+    display_name: string;
+    supports_variations: boolean;
+    possible_values: Array<{ value_id: number | null; name: string }> | null;
+  }>;
+}
+
+/** The set of properties (e.g. Size, Color) a given taxonomy category supports as listing variations. */
+export async function getVariationProperties(taxonomyId: number): Promise<VariationProperty[]> {
+  const res = await etsyFetch(`/application/seller-taxonomy/nodes/${taxonomyId}/properties`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Etsy taxonomy properties (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as TaxonomyNodePropertiesResponse;
+  return data.results
+    .filter((p) => p.supports_variations)
+    .map((p) => ({
+      propertyId: p.property_id,
+      name: p.name,
+      displayName: p.display_name,
+      possibleValues: (p.possible_values ?? []).map((v) => ({ valueId: v.value_id, name: v.name })),
+    }));
+}
+
 export interface DraftListingInput {
   title: string;
   description: string;
@@ -190,6 +229,58 @@ export async function setListingSku(listingId: number, sku: string): Promise<voi
   });
   if (!putRes.ok) {
     throw new Error(`Failed to set Etsy listing SKU on ${listingId} (${putRes.status}): ${await putRes.text()}`);
+  }
+}
+
+export interface VariationProductInput {
+  sku: string | null;
+  price: number;
+  quantity: number;
+  propertyValues: Array<{
+    propertyId: number;
+    propertyName: string;
+    valueIds: number[];
+    values: string[];
+  }>;
+}
+
+/**
+ * Replaces a listing's inventory with one product per Shopify variant, each carrying its own
+ * SKU/price/quantity and the Etsy property values (e.g. Size: Medium) mapped for it. Used instead
+ * of setListingSku when a Shopify product has more than one variant.
+ */
+export async function setListingVariations(
+  listingId: number,
+  products: VariationProductInput[],
+  readinessStateId: number
+): Promise<void> {
+  const putBody = {
+    products: products.map((p) => ({
+      sku: p.sku ?? undefined,
+      property_values: p.propertyValues.map((pv) => ({
+        property_id: pv.propertyId,
+        property_name: pv.propertyName,
+        value_ids: pv.valueIds,
+        values: pv.values,
+      })),
+      offerings: [
+        {
+          quantity: p.quantity,
+          is_enabled: true,
+          price: p.price,
+          readiness_state_id: readinessStateId,
+        },
+      ],
+    })),
+  };
+
+  const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(putBody),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to set Etsy listing variations on ${listingId} (${res.status}): ${await res.text()}`);
   }
 }
 

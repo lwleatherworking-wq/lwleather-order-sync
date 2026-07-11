@@ -74,6 +74,19 @@ export async function listProducts(): Promise<ProductSummary[]> {
   return products;
 }
 
+export interface ProductVariant {
+  id: string;
+  sku: string | null;
+  price: string;
+  inventoryQuantity: number;
+  selectedOptions: Array<{ name: string; value: string }>;
+}
+
+export interface ProductOption {
+  name: string;
+  values: string[];
+}
+
 export interface ProductDetail {
   id: string;
   title: string;
@@ -82,6 +95,8 @@ export interface ProductDetail {
   sku: string | null;
   totalInventory: number;
   imageUrls: string[];
+  options: ProductOption[];
+  variants: ProductVariant[];
 }
 
 const DETAIL_QUERY = /* GraphQL */ `
@@ -96,10 +111,20 @@ const DETAIL_QUERY = /* GraphQL */ `
           url
         }
       }
-      variants(first: 1) {
+      options {
+        name
+        values
+      }
+      variants(first: 100) {
         nodes {
+          id
           sku
           price
+          inventoryQuantity
+          selectedOptions {
+            name
+            value
+          }
         }
       }
     }
@@ -113,7 +138,8 @@ interface GetProductDetailResult {
     descriptionHtml: string;
     totalInventory: number;
     images: { nodes: Array<{ url: string }> };
-    variants: { nodes: Array<{ sku: string | null; price: string }> };
+    options: ProductOption[];
+    variants: { nodes: ProductVariant[] };
   } | null;
 }
 
@@ -129,5 +155,7 @@ export async function getProductDetail(id: string): Promise<ProductDetail | null
     sku: firstVariant?.sku ?? null,
     totalInventory: data.product.totalInventory,
     imageUrls: data.product.images.nodes.map((n) => n.url),
+    options: data.product.options,
+    variants: data.product.variants.nodes,
   };
 }

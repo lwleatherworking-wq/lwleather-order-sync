@@ -122,7 +122,13 @@ orders going forward, not import your whole order history. To pull in older orde
   files — the success message reports how many uploaded. Each product tracks which
   Etsy draft it was sent to, so the picker shows "already listed" instead of a link
   once one exists — submitting again from that product's form still creates a
-  **separate** new draft (there's no update-in-place).
+  **separate** new draft (there's no update-in-place). For a product with more than
+  one Shopify variant, the flat price/quantity/SKU fields are replaced by a
+  **Variations** section: pick a category first, then map each Shopify option (e.g.
+  "Size") to one of the Etsy properties that category supports, and each of its
+  values either to one of Etsy's existing options or as custom text — Etsy ties
+  variations to its own structured property system, so this can't be inferred
+  automatically. Every variant becomes its own SKU/price/quantity on the listing.
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.
