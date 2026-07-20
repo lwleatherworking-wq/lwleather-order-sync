@@ -1633,7 +1633,7 @@ async function handleSyncSkusPushPost(req: IncomingMessage, res: ServerResponse)
       // Re-analyze just this listing right before writing, rather than trusting the diff a
       // hidden form field carried from an earlier page load — Etsy/Shopify state may have
       // moved on since then.
-      const { statuses } = await analyzeEtsySkuSync(shopId, listingId);
+      const { statuses } = await analyzeEtsySkuSync(shopId, listingId, true);
       const status = statuses[0];
       if (!status || status.matchStatus !== "linked") {
         const { html, headers } = await syncSkusPageHtml({
@@ -1666,7 +1666,7 @@ async function handleSyncSkusPushPost(req: IncomingMessage, res: ServerResponse)
   }
 
   if (action === "push_all") {
-    const { statuses } = await analyzeEtsySkuSync(shopId);
+    const { statuses } = await analyzeEtsySkuSync(shopId, undefined, true);
     const pushableNow = statuses.filter((s) => s.matchStatus === "linked" && s.diffs.some((d) => d.changed));
     let succeeded = 0;
     let failed = 0;

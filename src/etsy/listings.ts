@@ -1,6 +1,11 @@
 import { etsyFetch } from "./apiClient.js";
+import { mapWithConcurrency } from "../util/concurrency.js";
 
 const PAGE_SIZE = 100;
+// Etsy's v3 API allows bursts well above this; kept modest so a shop with many listings
+// doesn't hammer the rate limit and trigger a wave of 429 backoffs that end up slower
+// than a lower concurrency would have been.
+const INVENTORY_FETCH_CONCURRENCY = 6;
 
 interface ShopListingsResponse {
   count: number;
@@ -69,17 +74,22 @@ export async function listEtsySkus(shopId: string): Promise<EtsySkuEntry[]> {
     return cache.entries;
   }
 
-  const listings = [
-    ...(await getListingsByState(shopId, "active")),
-    ...(await getListingsByState(shopId, "draft")),
-  ];
+  const [activeListings, draftListings] = await Promise.all([
+    getListingsByState(shopId, "active"),
+    getListingsByState(shopId, "draft"),
+  ]);
+  const listings = [...activeListings, ...draftListings];
+
+  const skusByListing = await mapWithConcurrency(listings, INVENTORY_FETCH_CONCURRENCY, (listing) =>
+    getListingSkus(listing.listingId)
+  );
+
   const entries: EtsySkuEntry[] = [];
-  for (const listing of listings) {
-    const skus = await getListingSkus(listing.listingId);
-    for (const sku of skus) {
+  listings.forEach((listing, i) => {
+    for (const sku of skusByListing[i]!) {
       entries.push({ sku, listingTitle: listing.title, listingState: listing.state });
     }
-  }
+  });
 
   entries.sort((a, b) => a.sku.localeCompare(b.sku));
   cache = { entries, cachedAt: Date.now() };

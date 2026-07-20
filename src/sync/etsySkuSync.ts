@@ -2,6 +2,11 @@ import { getListingsByState } from "../etsy/listings.js";
 import { getListingInventory, updateListingSkus, type ListingInventoryProduct } from "../etsy/shopListings.js";
 import { listProductsWithVariants, type ProductWithVariants, type ProductVariant } from "../shopify/products.js";
 import { listEtsyListingLinks } from "../db/etsyListingLinkStore.js";
+import { mapWithConcurrency } from "../util/concurrency.js";
+
+// Kept modest so a shop with many listings doesn't hammer Etsy's rate limit and trigger a
+// wave of 429 backoffs that end up slower than a lower concurrency would have been.
+const INVENTORY_FETCH_CONCURRENCY = 6;
 
 export interface SkuDiff {
   productId: number; // Etsy inventory product id
@@ -99,12 +104,18 @@ function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, P
  *
  * Pass `onlyListingId` to analyze a single listing cheaply (used by the push routes to
  * re-verify right before writing, instead of trusting a stale value from a submitted form).
+ * Pass `forceRefreshShopifyProducts` to bypass the Shopify product cache — the push routes
+ * use this so a write is never based on a stale pre-cache-expiry SKU.
  */
-export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number): Promise<SyncAnalysis> {
+export async function analyzeEtsySkuSync(
+  shopId: string,
+  onlyListingId?: number,
+  forceRefreshShopifyProducts = false
+): Promise<SyncAnalysis> {
   const [activeListings, draftListings, shopifyProducts, links] = await Promise.all([
     getListingsByState(shopId, "active"),
     getListingsByState(shopId, "draft"),
-    listProductsWithVariants(),
+    listProductsWithVariants({ forceRefresh: forceRefreshShopifyProducts }),
     Promise.resolve(listEtsyListingLinks()),
   ]);
   const listings = (
@@ -117,9 +128,16 @@ export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number)
   const productById = new Map(shopifyProducts.map((p) => [p.id, p]));
   const productByTitleLower = new Map(shopifyProducts.map((p) => [p.title.toLowerCase().trim(), p]));
 
+  // One Etsy inventory GET per listing — fetched with bounded concurrency instead of a
+  // sequential loop, since with N listings a serial version means N round trips of Etsy
+  // latency stacked up back-to-back.
+  const inventoryByListing = await mapWithConcurrency(listings, INVENTORY_FETCH_CONCURRENCY, (listing) =>
+    getListingInventory(listing.listingId)
+  );
+
   const statuses: ListingSyncStatus[] = [];
 
-  for (const listing of listings) {
+  listings.forEach((listing, listingIndex) => {
     const linkedProductId = linkedListingToProduct.get(String(listing.listingId));
     let matchStatus: MatchStatus;
     let matchedProduct: ProductWithVariants | undefined;
@@ -132,7 +150,7 @@ export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number)
       matchStatus = matchedProduct ? "suggested" : "unmatched";
     }
 
-    const inventory = await getListingInventory(listing.listingId);
+    const inventory = inventoryByListing[listingIndex]!;
     const currentSkus = inventory.map((p) => p.sku).filter((sku): sku is string => Boolean(sku));
 
     if (!matchedProduct) {
@@ -147,7 +165,7 @@ export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number)
         diffs: [],
         warning: null,
       });
-      continue;
+      return;
     }
 
     const mapping = matchInventoryToVariants(inventory, matchedProduct.variants);
@@ -167,7 +185,7 @@ export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number)
             ? `Linked product's variants (${matchedProduct.variants.length}) don't line up 1:1 with this listing's Etsy variations (${inventory.length}) — skipped, needs a manual look.`
             : "Couldn't confidently match Etsy variations to Shopify variants by option values — skipped.",
       });
-      continue;
+      return;
     }
 
     statuses.push({
@@ -181,7 +199,7 @@ export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number)
       diffs: buildDiffs(inventory, mapping),
       warning: null,
     });
-  }
+  });
 
   return { statuses, shopifyProducts };
 }

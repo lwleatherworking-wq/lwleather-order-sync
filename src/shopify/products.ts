@@ -49,8 +49,18 @@ interface ListProductsResult {
 
 const MAX_PRODUCTS = 250;
 
+// A full catalog listing takes several sequential paginated round trips to Shopify — worth
+// caching briefly so navigating between pages (or reloading the same one) doesn't re-pay that
+// cost every time. Short enough that a product edited in Shopify shows up again quickly.
+const LIST_CACHE_TTL_MS = 2 * 60 * 1000;
+let listProductsCache: { entries: ProductSummary[]; cachedAt: number } | undefined;
+
 /** Lists Shopify products for the product picker, using the first variant's price/SKU as a default. */
 export async function listProducts(): Promise<ProductSummary[]> {
+  if (listProductsCache && Date.now() - listProductsCache.cachedAt < LIST_CACHE_TTL_MS) {
+    return listProductsCache.entries;
+  }
+
   const products: ProductSummary[] = [];
   let cursor: string | undefined;
 
@@ -71,6 +81,7 @@ export async function listProducts(): Promise<ProductSummary[]> {
     cursor = data.products.pageInfo.endCursor ?? undefined;
   }
 
+  listProductsCache = { entries: products, cachedAt: Date.now() };
   return products;
 }
 
@@ -114,12 +125,26 @@ interface ListProductsWithVariantsResult {
   };
 }
 
+// Short TTL, not the 2 minutes used for the plain product picker: this feeds the SKU-sync
+// diff that gets written back to Etsy, so staleness has a real correctness cost, not just a
+// display lag. Callers about to write (see `forceRefresh`) bypass this entirely.
+const WITH_VARIANTS_CACHE_TTL_MS = 60 * 1000;
+let listProductsWithVariantsCache: { entries: ProductWithVariants[]; cachedAt: number } | undefined;
+
 /**
  * Lists every Shopify product with all of its variants (SKU + selected options), for matching
  * against Etsy listings by variant identity rather than just a single SKU — needed because a
  * SKU that just changed in Shopify can't be used to find its own match.
  */
-export async function listProductsWithVariants(): Promise<ProductWithVariants[]> {
+export async function listProductsWithVariants(options?: { forceRefresh?: boolean }): Promise<ProductWithVariants[]> {
+  if (
+    !options?.forceRefresh &&
+    listProductsWithVariantsCache &&
+    Date.now() - listProductsWithVariantsCache.cachedAt < WITH_VARIANTS_CACHE_TTL_MS
+  ) {
+    return listProductsWithVariantsCache.entries;
+  }
+
   const products: ProductWithVariants[] = [];
   let cursor: string | undefined;
 
@@ -132,6 +157,7 @@ export async function listProductsWithVariants(): Promise<ProductWithVariants[]>
     cursor = data.products.pageInfo.endCursor ?? undefined;
   }
 
+  listProductsWithVariantsCache = { entries: products, cachedAt: Date.now() };
   return products;
 }
 
