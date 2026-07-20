@@ -217,6 +217,7 @@ const SHARED_STYLE = `
     .inline-form button { margin-top: 0; }
     code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 3px; }
     .combobox { position: relative; }
+    .inline-form .combobox { flex: 1; min-width: 0; }
     .combobox-results {
       display: none; position: absolute; z-index: 10; top: 100%; left: 0; right: 0;
       background: var(--bg); border: 1px solid var(--input-border); border-top: none; border-radius: 0 0 6px 6px;
@@ -1080,6 +1081,116 @@ async function listToEtsyProductPageHtml(params: {
 /** Client-side mapping UI: lets the user assign each Shopify option (e.g. Size) to one of the
  * Etsy properties available for the chosen category, and each value to one of that property's
  * existing options (or custom text), then serializes the mapping into a hidden field on submit. */
+/** A searchable text-input alternative to a plain <select>, for picking a Shopify product to
+ * match an Etsy listing to on /sync-skus-to-etsy — one shop can have far too many products to
+ * scan through a dropdown. Wires up every ".product-picker" on the page (one per unmatched
+ * listing) against the same shared product list. */
+function productPickerScript(productOptionsJson: string): string {
+  return `
+  <script>
+    (function () {
+      var PRODUCTS = ${productOptionsJson};
+      var MAX_RESULTS = 30;
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function highlight(text, query) {
+        var idx = text.toLowerCase().indexOf(query.toLowerCase());
+        if (idx === -1) return escapeHtml(text);
+        return (
+          escapeHtml(text.slice(0, idx)) +
+          "<mark>" + escapeHtml(text.slice(idx, idx + query.length)) + "</mark>" +
+          escapeHtml(text.slice(idx + query.length))
+        );
+      }
+
+      document.querySelectorAll(".product-picker").forEach(function (picker) {
+        var search = picker.querySelector(".product-search");
+        var hidden = picker.querySelector(".product-id-input");
+        var results = picker.querySelector(".combobox-results");
+        var form = picker.closest("form");
+        if (!search || !hidden || !results || !form) return;
+
+        function closeResults() {
+          results.innerHTML = "";
+          results.classList.remove("open");
+        }
+
+        function render(query) {
+          var q = query.trim().toLowerCase();
+          if (!q) {
+            closeResults();
+            return;
+          }
+          var matches = PRODUCTS.filter(function (p) {
+            return p.title.toLowerCase().indexOf(q) !== -1;
+          }).slice(0, MAX_RESULTS);
+
+          if (matches.length === 0) {
+            results.innerHTML = '<div class="combobox-result combobox-empty">No matching products</div>';
+            results.classList.add("open");
+            return;
+          }
+
+          results.innerHTML = matches
+            .map(function (p) {
+              return (
+                '<div class="combobox-result" data-id="' + escapeHtml(p.id) + '" data-title="' + escapeHtml(p.title) + '">' +
+                highlight(p.title, q) +
+                "</div>"
+              );
+            })
+            .join("");
+          results.classList.add("open");
+        }
+
+        function select(id, title) {
+          hidden.value = id;
+          search.value = title;
+          closeResults();
+        }
+
+        search.addEventListener("input", function () {
+          hidden.value = "";
+          render(search.value);
+        });
+
+        search.addEventListener("focus", function () {
+          if (search.value.trim()) render(search.value);
+        });
+
+        results.addEventListener("mousedown", function (e) {
+          var item = e.target.closest(".combobox-result");
+          if (!item || !item.dataset.id) return;
+          e.preventDefault();
+          select(item.dataset.id, item.dataset.title);
+        });
+
+        form.addEventListener("submit", function (e) {
+          if (!hidden.value) {
+            e.preventDefault();
+            results.innerHTML = '<div class="combobox-result combobox-empty">Pick a product from the list before confirming.</div>';
+            results.classList.add("open");
+            search.focus();
+          }
+        });
+      });
+
+      document.addEventListener("click", function (e) {
+        if (e.target.closest(".product-picker")) return;
+        document.querySelectorAll(".product-picker .combobox-results.open").forEach(function (r) {
+          r.innerHTML = "";
+          r.classList.remove("open");
+        });
+      });
+    })();
+  </script>`;
+}
+
 function variationsMappingScript(productOptionsJson: string): string {
   return `
   <script>
@@ -1514,21 +1625,28 @@ async function syncSkusPageHtml(params: {
         <td>
           <form method="POST" action="/sync-skus-to-etsy/link" class="inline-form">
             <input type="hidden" name="listingId" value="${s.listingId}">
-            <select name="shopifyProductId" required>
-              <option value="">Pick a Shopify product…</option>
-              ${shopifyProducts
-                .map(
-                  (p) =>
-                    `<option value="${escapeHtml(p.id)}" ${p.id === s.matchedProductId ? "selected" : ""}>${escapeHtml(p.title)}</option>`
-                )
-                .join("")}
-            </select>
+            <div class="combobox product-picker">
+              <input
+                type="text"
+                class="product-search"
+                placeholder="Type a product name…"
+                autocomplete="off"
+                value="${escapeHtml(s.matchedProductTitle ?? "")}"
+              >
+              <div class="combobox-results"></div>
+              <input type="hidden" name="shopifyProductId" class="product-id-input" value="${escapeHtml(s.matchedProductId ?? "")}">
+            </div>
             <button type="submit">Confirm match</button>
           </form>
         </td>
       </tr>`;
     })
     .join("");
+
+  const productPickerOptionsJson = JSON.stringify(shopifyProducts.map((p) => ({ id: p.id, title: p.title }))).replace(
+    /</g,
+    "\\u003c"
+  );
 
   const inSyncRows = inSync
     .map(
@@ -1568,7 +1686,8 @@ async function syncSkusPageHtml(params: {
       ? `<table>
           <tr><th>Etsy listing</th><th>Current Etsy SKU(s)</th><th>Match to Shopify product</th></tr>
           ${needsMatchRows}
-        </table>`
+        </table>
+        ${productPickerScript(productPickerOptionsJson)}`
       : `<p>Nothing left to match.</p>`
   }
 
