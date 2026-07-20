@@ -1728,9 +1728,29 @@ async function handleSyncSkusLinkPost(req: IncomingMessage, res: ServerResponse)
 
   recordEtsyListingLink(shopifyProductId, listingId);
   logger.info("Confirmed Etsy listing ↔ Shopify product match via /sync-skus-to-etsy", { listingId, shopifyProductId });
-  const { html, headers } = await syncSkusPageHtml({
-    message: `Matched listing #${listingId}. Review the SKU diff below before pushing.`,
-  });
+
+  // Re-analyze just this listing so the confirmation message reflects what actually happens
+  // next, rather than a generic "review below" that's misleading whenever the match can't be
+  // pushed automatically (e.g. an ambiguous variant match) or there's simply nothing to change.
+  let message = `Matched listing #${listingId}.`;
+  try {
+    const listingIdNum = Number(listingId);
+    const { statuses } = await analyzeEtsySkuSync(getShopId(), Number.isFinite(listingIdNum) ? listingIdNum : undefined, true);
+    const status = statuses[0];
+    if (status?.warning) {
+      message += ` ${status.warning}`;
+    } else if (status && status.diffs.some((d) => d.changed)) {
+      message += ` Review the SKU diff in "Ready to push" below.`;
+    } else if (status) {
+      message += ` Its SKU(s) already match Shopify — nothing to push.`;
+    } else {
+      message += ` Review the SKU diff below before pushing.`;
+    }
+  } catch {
+    message += ` Review the SKU diff below before pushing.`;
+  }
+
+  const { html, headers } = await syncSkusPageHtml({ message });
   sendHtml(res, 200, html, headers);
 }
 
