@@ -39,6 +39,31 @@ function variantLabel(variant: ProductVariant): string {
   return variant.selectedOptions.map((o) => `${o.name}: ${o.value}`).join(", ") || "—";
 }
 
+function describeInventoryValues(inv: ListingInventoryProduct): string {
+  const values = inv.propertyValues.flatMap((pv) => pv.values);
+  return values.length > 0 ? values.join("/") : "(no variation values)";
+}
+
+function describeVariantValues(variant: ProductVariant): string {
+  const values = variant.selectedOptions.map((o) => o.value);
+  return values.length > 0 ? values.join("/") : "(no options)";
+}
+
+/**
+ * Explains why matchInventoryToVariants couldn't find an unambiguous 1:1 mapping, showing the
+ * actual values on both sides — a bare "don't line up" message with matching counts (e.g. 4
+ * and 4) gives no clue that the real problem is a text mismatch (Shopify "S/M/L/XL" vs Etsy
+ * "Small/Medium/Large/X-Large"), which is the far more common cause once counts already agree.
+ */
+function describeMismatch(inventory: ListingInventoryProduct[], variants: ProductVariant[]): string {
+  const etsySide = inventory.map(describeInventoryValues).join(", ");
+  const shopifySide = variants.map(describeVariantValues).join(", ");
+  if (inventory.length !== variants.length) {
+    return `Shopify has ${variants.length} variant(s) (${shopifySide}) but this Etsy listing has ${inventory.length} variation(s) (${etsySide}) — counts don't match, skipped.`;
+  }
+  return `Couldn't match Etsy's variation values (${etsySide}) to Shopify's variant options (${shopifySide}) by exact text — skipped rather than guess which SKU goes where. Check for wording differences (e.g. abbreviations, spelling, extra words).`;
+}
+
 /**
  * True if an Etsy inventory product's variation property values are the same set of text
  * values as a Shopify variant's selected options (order-independent, case-insensitive).
@@ -180,10 +205,7 @@ export async function analyzeEtsySkuSync(
         matchedProductTitle: matchedProduct.title,
         currentSkus,
         diffs: [],
-        warning:
-          matchStatus === "linked"
-            ? `Linked product's variants (${matchedProduct.variants.length}) don't line up 1:1 with this listing's Etsy variations (${inventory.length}) — skipped, needs a manual look.`
-            : "Couldn't confidently match Etsy variations to Shopify variants by option values — skipped.",
+        warning: describeMismatch(inventory, matchedProduct.variants),
       });
       return;
     }
