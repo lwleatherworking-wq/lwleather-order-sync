@@ -64,25 +64,71 @@ function describeMismatch(inventory: ListingInventoryProduct[], variants: Produc
   return `Couldn't match Etsy's variation values (${etsySide}) to Shopify's variant options (${shopifySide}) by exact text — skipped rather than guess which SKU goes where. Check for wording differences (e.g. abbreviations, spelling, extra words).`;
 }
 
+function exactKey(raw: string): string {
+  return raw.toLowerCase().trim();
+}
+
 /**
- * True if an Etsy inventory product's variation property values are the same set of text
- * values as a Shopify variant's selected options (order-independent, case-insensitive).
+ * Strips off numbers/measurements and anything in parentheses to get a coarse label — e.g.
+ * `Small (30" - 32")` and `Small - 30 - 32 Inches (76 - 81cm)` both reduce to "small". Used as
+ * a looser second-pass match for when Etsy and Shopify describe the same size/color with
+ * different wording but still share a recognizable leading label. Returns "" for values with
+ * no such leading word (e.g. a bare "30"), which valueSetsMatch treats as never matching —
+ * this pass only ever helps, it can't turn a real mismatch into a false one.
  */
-function propertyValuesMatchVariant(inv: ListingInventoryProduct, variant: ProductVariant): boolean {
-  const invValues = inv.propertyValues.flatMap((pv) => pv.values.map((v) => v.toLowerCase().trim()));
-  const variantValues = variant.selectedOptions.map((o) => o.value.toLowerCase().trim());
-  if (invValues.length !== variantValues.length) return false;
-  const sortedA = [...invValues].sort();
-  const sortedB = [...variantValues].sort();
+function looseKey(raw: string): string {
+  return (raw.split(/[\d(]/)[0] ?? "").replace(/[-\s]+$/, "").trim().toLowerCase();
+}
+
+function inventoryValueSet(inv: ListingInventoryProduct, keyFn: (raw: string) => string): string[] {
+  return inv.propertyValues.flatMap((pv) => pv.values.map(keyFn));
+}
+
+function variantValueSet(variant: ProductVariant, keyFn: (raw: string) => string): string[] {
+  return variant.selectedOptions.map((o) => keyFn(o.value));
+}
+
+function valueSetsMatch(a: string[], b: string[]): boolean {
+  if (a.length !== b.length || a.length === 0) return false;
+  if (a.some((v) => !v) || b.some((v) => !v)) return false; // empty key never counts as a match
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
   return sortedA.every((v, i) => v === sortedB[i]);
+}
+
+/**
+ * Finds a 1:1 pairing between every Etsy inventory product and a Shopify variant, using
+ * `keyFn` to compare their variation values. Returns null the moment any product doesn't have
+ * exactly one candidate — ambiguity (0 or 2+ matches) is never resolved by guessing, since a
+ * wrong guess would silently scramble which SKU lands on which variant.
+ */
+function matchByKey(
+  inventory: ListingInventoryProduct[],
+  variants: ProductVariant[],
+  keyFn: (raw: string) => string
+): Map<number, ProductVariant> | null {
+  const result = new Map<number, ProductVariant>();
+  const usedVariantIndexes = new Set<number>();
+  for (const inv of inventory) {
+    const invValues = inventoryValueSet(inv, keyFn);
+    const candidates = variants
+      .map((v, i) => ({ v, i }))
+      .filter(({ v, i }) => !usedVariantIndexes.has(i) && valueSetsMatch(invValues, variantValueSet(v, keyFn)));
+    if (candidates.length !== 1) return null;
+    result.set(inv.productId, candidates[0]!.v);
+    usedVariantIndexes.add(candidates[0]!.i);
+  }
+  return result;
 }
 
 /**
  * Matches each Etsy inventory product (one per variation combo, or a single one for a listing
  * with no variations) to the Shopify variant it corresponds to. Matches by variation property
  * values rather than SKU, since the SKU is exactly what's being changed and so can't be used to
- * find its own match. Returns null if the match isn't unambiguous — callers must not push SKUs
- * in that case, since a wrong guess would silently scramble which SKU lands on which variant.
+ * find its own match. Tries an exact text match first, then falls back to a coarser label match
+ * for when the two platforms word the same size/color differently (see `looseKey`) — either way,
+ * only ever returns a mapping when it's an unambiguous 1:1 bijection; anything less certain
+ * returns null so callers never guess.
  */
 function matchInventoryToVariants(
   inventory: ListingInventoryProduct[],
@@ -93,17 +139,7 @@ function matchInventoryToVariants(
   }
   if (inventory.length !== variants.length) return null;
 
-  const result = new Map<number, ProductVariant>();
-  const usedVariantIndexes = new Set<number>();
-  for (const inv of inventory) {
-    const candidates = variants
-      .map((v, i) => ({ v, i }))
-      .filter(({ v, i }) => !usedVariantIndexes.has(i) && propertyValuesMatchVariant(inv, v));
-    if (candidates.length !== 1) return null;
-    result.set(inv.productId, candidates[0]!.v);
-    usedVariantIndexes.add(candidates[0]!.i);
-  }
-  return result;
+  return matchByKey(inventory, variants, exactKey) ?? matchByKey(inventory, variants, looseKey);
 }
 
 function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, ProductVariant>): SkuDiff[] {
