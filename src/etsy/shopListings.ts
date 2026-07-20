@@ -253,6 +253,19 @@ interface RawListingInventoryResponse {
       readiness_state_id: number | null;
     }>;
   }>;
+  // Which variation property (e.g. Size) each of price/quantity/sku is allowed to differ
+  // across — if a PUT omits these, Etsy assumes none of them vary and then rejects the
+  // request as soon as two products in the payload actually have different values.
+  price_on_property: number[];
+  quantity_on_property: number[];
+  sku_on_property: number[];
+}
+
+interface InventorySnapshot {
+  products: ListingInventoryProduct[];
+  priceOnProperty: number[];
+  quantityOnProperty: number[];
+  skuOnProperty: number[];
 }
 
 // Both /sku-linking and /sync-skus-to-etsy independently need "every listing's inventory"
@@ -261,24 +274,9 @@ interface RawListingInventoryResponse {
 // Short enough that a manual edit on Etsy shows up again quickly; the SKU-push path bypasses
 // it entirely via `forceRefresh` since a write must never be based on stale inventory.
 const INVENTORY_CACHE_TTL_MS = 3 * 60 * 1000;
-const inventoryCache = new Map<number, { products: ListingInventoryProduct[]; cachedAt: number }>();
+const inventoryCache = new Map<number, { snapshot: InventorySnapshot; cachedAt: number }>();
 
-/**
- * Fetches a listing's full inventory (non-deleted products only), including SKU, variation
- * property values, and offerings. Used to compute SKU diffs against Shopify without needing
- * to know or reconstruct anything else about the listing.
- */
-export async function getListingInventory(
-  listingId: number,
-  options?: { forceRefresh?: boolean }
-): Promise<ListingInventoryProduct[]> {
-  if (!options?.forceRefresh) {
-    const cached = inventoryCache.get(listingId);
-    if (cached && Date.now() - cached.cachedAt < INVENTORY_CACHE_TTL_MS) {
-      return cached.products;
-    }
-  }
-
+async function fetchListingInventorySnapshot(listingId: number): Promise<InventorySnapshot> {
   const res = await etsyFetch(`/application/listings/${listingId}/inventory`);
   if (!res.ok) {
     throw new Error(`Failed to fetch Etsy listing inventory ${listingId} (${res.status}): ${await res.text()}`);
@@ -305,19 +303,55 @@ export async function getListingInventory(
         })),
     }));
 
-  inventoryCache.set(listingId, { products, cachedAt: Date.now() });
-  return products;
+  return {
+    products,
+    priceOnProperty: data.price_on_property ?? [],
+    quantityOnProperty: data.quantity_on_property ?? [],
+    skuOnProperty: data.sku_on_property ?? [],
+  };
+}
+
+async function getListingInventorySnapshot(
+  listingId: number,
+  options?: { forceRefresh?: boolean }
+): Promise<InventorySnapshot> {
+  if (!options?.forceRefresh) {
+    const cached = inventoryCache.get(listingId);
+    if (cached && Date.now() - cached.cachedAt < INVENTORY_CACHE_TTL_MS) {
+      return cached.snapshot;
+    }
+  }
+  const snapshot = await fetchListingInventorySnapshot(listingId);
+  inventoryCache.set(listingId, { snapshot, cachedAt: Date.now() });
+  return snapshot;
+}
+
+/**
+ * Fetches a listing's full inventory (non-deleted products only), including SKU, variation
+ * property values, and offerings. Used to compute SKU diffs against Shopify without needing
+ * to know or reconstruct anything else about the listing.
+ */
+export async function getListingInventory(
+  listingId: number,
+  options?: { forceRefresh?: boolean }
+): Promise<ListingInventoryProduct[]> {
+  const snapshot = await getListingInventorySnapshot(listingId, options);
+  return snapshot.products;
 }
 
 /**
  * Pushes new SKUs onto specific inventory products of an *existing* listing, keyed by Etsy's
- * own product_id, preserving every other field (property values, offerings, price, quantity)
- * exactly as Etsy currently has them. Products not present in `skuByProductId` keep their
- * current SKU untouched. Used to re-sync SKUs after they've changed in Shopify, as opposed to
- * setListingSku which only ever runs once, right after a brand-new draft is created.
+ * own product_id, preserving every other field (property values, offerings, price, quantity,
+ * and which property each of those is allowed to vary by) exactly as Etsy currently has them.
+ * Products not present in `skuByProductId` keep their current SKU untouched. Used to re-sync
+ * SKUs after they've changed in Shopify, as opposed to setListingSku which only ever runs
+ * once, right after a brand-new draft is created.
  */
 export async function updateListingSkus(listingId: number, skuByProductId: Map<number, string>): Promise<void> {
-  const products = await getListingInventory(listingId, { forceRefresh: true });
+  const { products, priceOnProperty, quantityOnProperty, skuOnProperty } = await getListingInventorySnapshot(
+    listingId,
+    { forceRefresh: true }
+  );
   const putBody = {
     products: products.map((p) => ({
       sku: skuByProductId.get(p.productId) ?? p.sku ?? undefined,
@@ -334,6 +368,9 @@ export async function updateListingSkus(listingId: number, skuByProductId: Map<n
         readiness_state_id: o.readinessStateId ?? undefined,
       })),
     })),
+    price_on_property: priceOnProperty,
+    quantity_on_property: quantityOnProperty,
+    sku_on_property: skuOnProperty,
   };
 
   const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
