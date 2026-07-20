@@ -1,4 +1,5 @@
 import { etsyFetch } from "./apiClient.js";
+import { getListingInventory } from "./shopListings.js";
 import { mapWithConcurrency } from "../util/concurrency.js";
 
 const PAGE_SIZE = 100;
@@ -40,18 +41,15 @@ export async function getListingsByState(
   return listings;
 }
 
-interface ListingInventoryResponse {
-  products: Array<{ sku: string | null; is_deleted: boolean }>;
-}
-
-/** Fetches the SKUs set on a single listing's products (one listing can have several). */
+/**
+ * Fetches the SKUs set on a single listing's products (one listing can have several). Shares
+ * the same cache as the SKU-sync feature's inventory lookups — both need "every listing's
+ * inventory" and previously fetched it independently, doubling the Etsy calls whenever both
+ * pages were used in the same session.
+ */
 export async function getListingSkus(listingId: number): Promise<string[]> {
-  const res = await etsyFetch(`/application/listings/${listingId}/inventory`);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch Etsy listing inventory ${listingId} (${res.status}): ${await res.text()}`);
-  }
-  const data = (await res.json()) as ListingInventoryResponse;
-  return data.products.filter((p) => !p.is_deleted && p.sku).map((p) => p.sku as string);
+  const products = await getListingInventory(listingId);
+  return products.filter((p) => p.sku).map((p) => p.sku as string);
 }
 
 export interface EtsySkuEntry {

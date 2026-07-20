@@ -255,18 +255,36 @@ interface RawListingInventoryResponse {
   }>;
 }
 
+// Both /sku-linking and /sync-skus-to-etsy independently need "every listing's inventory"
+// and previously each re-fetched it from scratch — this cache lets a page visited shortly
+// after another one reuse those calls instead of repeating the exact same Etsy requests.
+// Short enough that a manual edit on Etsy shows up again quickly; the SKU-push path bypasses
+// it entirely via `forceRefresh` since a write must never be based on stale inventory.
+const INVENTORY_CACHE_TTL_MS = 3 * 60 * 1000;
+const inventoryCache = new Map<number, { products: ListingInventoryProduct[]; cachedAt: number }>();
+
 /**
  * Fetches a listing's full inventory (non-deleted products only), including SKU, variation
  * property values, and offerings. Used to compute SKU diffs against Shopify without needing
  * to know or reconstruct anything else about the listing.
  */
-export async function getListingInventory(listingId: number): Promise<ListingInventoryProduct[]> {
+export async function getListingInventory(
+  listingId: number,
+  options?: { forceRefresh?: boolean }
+): Promise<ListingInventoryProduct[]> {
+  if (!options?.forceRefresh) {
+    const cached = inventoryCache.get(listingId);
+    if (cached && Date.now() - cached.cachedAt < INVENTORY_CACHE_TTL_MS) {
+      return cached.products;
+    }
+  }
+
   const res = await etsyFetch(`/application/listings/${listingId}/inventory`);
   if (!res.ok) {
     throw new Error(`Failed to fetch Etsy listing inventory ${listingId} (${res.status}): ${await res.text()}`);
   }
   const data = (await res.json()) as RawListingInventoryResponse;
-  return data.products
+  const products = data.products
     .filter((p) => !p.is_deleted)
     .map((p) => ({
       productId: p.product_id,
@@ -286,6 +304,9 @@ export async function getListingInventory(listingId: number): Promise<ListingInv
           readinessStateId: o.readiness_state_id,
         })),
     }));
+
+  inventoryCache.set(listingId, { products, cachedAt: Date.now() });
+  return products;
 }
 
 /**
@@ -296,7 +317,7 @@ export async function getListingInventory(listingId: number): Promise<ListingInv
  * setListingSku which only ever runs once, right after a brand-new draft is created.
  */
 export async function updateListingSkus(listingId: number, skuByProductId: Map<number, string>): Promise<void> {
-  const products = await getListingInventory(listingId);
+  const products = await getListingInventory(listingId, { forceRefresh: true });
   const putBody = {
     products: products.map((p) => ({
       sku: skuByProductId.get(p.productId) ?? p.sku ?? undefined,
@@ -323,6 +344,9 @@ export async function updateListingSkus(listingId: number, skuByProductId: Map<n
   if (!res.ok) {
     throw new Error(`Failed to update Etsy listing SKUs on ${listingId} (${res.status}): ${await res.text()}`);
   }
+  // Otherwise a page reload right after pushing would still show the pre-push SKU for up
+  // to INVENTORY_CACHE_TTL_MS, since the cache was populated by the read a moment ago.
+  inventoryCache.delete(listingId);
 }
 
 export interface VariationProductInput {

@@ -104,18 +104,18 @@ function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, P
  *
  * Pass `onlyListingId` to analyze a single listing cheaply (used by the push routes to
  * re-verify right before writing, instead of trusting a stale value from a submitted form).
- * Pass `forceRefreshShopifyProducts` to bypass the Shopify product cache — the push routes
- * use this so a write is never based on a stale pre-cache-expiry SKU.
+ * Pass `forceRefresh` to bypass both the Shopify product cache and the Etsy inventory cache —
+ * the push routes use this so a write is never based on stale pre-cache-expiry data.
  */
 export async function analyzeEtsySkuSync(
   shopId: string,
   onlyListingId?: number,
-  forceRefreshShopifyProducts = false
+  forceRefresh = false
 ): Promise<SyncAnalysis> {
   const [activeListings, draftListings, shopifyProducts, links] = await Promise.all([
     getListingsByState(shopId, "active"),
     getListingsByState(shopId, "draft"),
-    listProductsWithVariants({ forceRefresh: forceRefreshShopifyProducts }),
+    listProductsWithVariants({ forceRefresh }),
     Promise.resolve(listEtsyListingLinks()),
   ]);
   const listings = (
@@ -132,7 +132,7 @@ export async function analyzeEtsySkuSync(
   // sequential loop, since with N listings a serial version means N round trips of Etsy
   // latency stacked up back-to-back.
   const inventoryByListing = await mapWithConcurrency(listings, INVENTORY_FETCH_CONCURRENCY, (listing) =>
-    getListingInventory(listing.listingId)
+    getListingInventory(listing.listingId, { forceRefresh })
   );
 
   const statuses: ListingSyncStatus[] = [];
