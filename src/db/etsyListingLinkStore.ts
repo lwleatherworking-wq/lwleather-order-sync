@@ -8,6 +8,14 @@ export function getEtsyListingLink(shopifyProductId: string): string | undefined
   return row?.etsy_listing_id;
 }
 
+/** Clears a product's link, e.g. after its Etsy draft was deleted directly on Etsy and the
+ * product needs to be listed fresh — without this, the app keeps pointing at a listing id
+ * that no longer exists on Etsy's side. */
+export function deleteEtsyListingLink(shopifyProductId: string): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM etsy_listing_links WHERE shopify_product_id = ?`).run(shopifyProductId);
+}
+
 export function recordEtsyListingLink(shopifyProductId: string, etsyListingId: string): void {
   const db = getDb();
   db.prepare(

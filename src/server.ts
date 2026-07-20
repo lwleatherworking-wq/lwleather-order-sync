@@ -17,7 +17,7 @@ import { clearCachedShopifyToken } from "./shopify/apiClient.js";
 import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
-import { getEtsyListingLink, recordEtsyListingLink } from "./db/etsyListingLinkStore.js";
+import { getEtsyListingLink, recordEtsyListingLink, deleteEtsyListingLink } from "./db/etsyListingLinkStore.js";
 import { listProducts, getProductDetail, type ProductDetail } from "./shopify/products.js";
 import { analyzeEtsySkuSync, pushSkuDiffs, type ListingSyncStatus } from "./sync/etsySkuSync.js";
 import {
@@ -215,6 +215,8 @@ const SHARED_STYLE = `
     .inline-form { display: flex; gap: 0.4rem; align-items: center; }
     .inline-form input[type="text"] { width: auto; flex: 1; }
     .inline-form button { margin-top: 0; }
+    .small-form { display: inline-block; margin-left: 0.4rem; }
+    .small-form button { margin-top: 0; padding: 0.15rem 0.5rem; font-size: 0.8rem; }
     code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 3px; }
     .combobox { position: relative; }
     .inline-form .combobox { flex: 1; min-width: 0; }
@@ -759,7 +761,11 @@ async function listToEtsyPageHtml(): Promise<{ html: string; headers?: Record<st
     .map((p) => {
       const linkedListingId = getEtsyListingLink(p.id);
       const statusCell = linkedListingId
-        ? `<a href="https://www.etsy.com/your/shops/me/tools/listings/${escapeHtml(linkedListingId)}" target="_blank" rel="noopener">Etsy draft #${escapeHtml(linkedListingId)}</a>`
+        ? `<a href="https://www.etsy.com/your/shops/me/tools/listings/${escapeHtml(linkedListingId)}" target="_blank" rel="noopener">Etsy draft #${escapeHtml(linkedListingId)}</a>
+           <form method="POST" action="/list-to-etsy/clear-link" class="small-form">
+             <input type="hidden" name="productId" value="${escapeHtml(p.id)}">
+             <button type="submit" title="Clear this link, e.g. if the draft was deleted on Etsy">Clear link</button>
+           </form>`
         : `<a href="/list-to-etsy/product?id=${encodeURIComponent(p.id)}">List to Etsy</a>`;
 
       let matchCell: string;
@@ -816,7 +822,19 @@ async function listToEtsyProductPageHtml(params: {
   message?: string;
   messageIsError?: boolean;
 }): Promise<{ html: string; headers?: Record<string, string>; status: number }> {
-  const product = await getProductDetail(params.productId);
+  let product: ProductDetail | null;
+  try {
+    product = await getProductDetail(params.productId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load the Shopify product.";
+    return {
+      ...renderPage({
+        title: "Failed to load product",
+        bodyHtml: `<h1>Failed to load product</h1><p class="banner error">${escapeHtml(message)}</p><p><a href="/list-to-etsy">Back to product list</a></p>`,
+      }),
+      status: 200,
+    };
+  }
   if (!product) {
     return {
       ...renderPage({ title: "Product not found", bodyHtml: `<h1>Product not found</h1><p><a href="/list-to-etsy">Back to product list</a></p>` }),
@@ -848,7 +866,12 @@ async function listToEtsyProductPageHtml(params: {
   }
 
   const alreadyLinkedBanner = alreadyLinked
-    ? `<p class="banner success">Already listed as Etsy draft #${escapeHtml(alreadyLinked)}. Submitting again will create a <strong>separate</strong> new draft listing.</p>`
+    ? `<p class="banner success">Already listed as Etsy draft #${escapeHtml(alreadyLinked)}. Submitting again will create a <strong>separate</strong> new draft listing.
+        <form method="POST" action="/list-to-etsy/clear-link" class="small-form">
+          <input type="hidden" name="productId" value="${escapeHtml(product.id)}">
+          <button type="submit" title="Clear this link, e.g. if the draft was deleted on Etsy">Clear link</button>
+        </form>
+      </p>`
     : "";
 
   if (loadError) {
@@ -1542,6 +1565,29 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   }
 }
 
+/** Clears a product's Etsy listing link — for when the linked draft/listing was deleted
+ * directly on Etsy, so the app would otherwise keep pointing at an id that no longer exists
+ * and block re-listing the product. */
+async function handleClearEtsyListingLinkPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const productId = params.get("productId");
+
+  if (!productId) {
+    sendHtml(res, 400, "<h1>Missing product id</h1>");
+    return;
+  }
+
+  deleteEtsyListingLink(productId);
+  logger.info("Cleared Etsy listing link via /list-to-etsy/clear-link", { productId });
+
+  const { html, headers, status } = await listToEtsyProductPageHtml({
+    productId,
+    message: "Cleared the link to that Etsy draft. You can list this product to Etsy again below.",
+  });
+  sendHtml(res, status, html, headers);
+}
+
 function bucketOfStatus(s: ListingSyncStatus): "pushable" | "inSync" | "review" | "needsMatch" {
   if (s.warning) return "review";
   if (s.matchStatus === "linked") return s.diffs.some((d) => d.changed) ? "pushable" : "inSync";
@@ -1993,6 +2039,7 @@ export function startServer(): void {
         if (url.pathname === "/sku-linking") return handleSkuLinkingGet(res);
         if (url.pathname === "/list-to-etsy/product" && req.method === "POST") return handleListToEtsyProductPost(url, req, res);
         if (url.pathname === "/list-to-etsy/product") return handleListToEtsyProductGet(url, res);
+        if (url.pathname === "/list-to-etsy/clear-link" && req.method === "POST") return handleClearEtsyListingLinkPost(req, res);
         if (url.pathname === "/list-to-etsy/etsy-properties") return handleEtsyPropertiesGet(url, res);
         if (url.pathname === "/list-to-etsy") return handleListToEtsyGet(res);
         if (url.pathname === "/sync-skus-to-etsy/link" && req.method === "POST") return handleSyncSkusLinkPost(req, res);
