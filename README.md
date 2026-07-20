@@ -129,6 +129,17 @@ orders going forward, not import your whole order history. To pull in older orde
   values either to one of Etsy's existing options or as custom text — Etsy ties
   variations to its own structured property system, so this can't be inferred
   automatically. Every variant becomes its own SKU/price/quantity on the listing.
+- **`/sync-skus-to-etsy`** — after renaming SKUs in Shopify, compares every active/draft Etsy
+  listing's SKU(s) against the Shopify product it's matched to and lets you push an update so
+  Etsy matches again. A listing is matched automatically if this app already links it (via
+  "List to Etsy", or a previously confirmed match here); otherwise an exact title match is
+  offered as a suggestion, and anything else needs a manual pick from a dropdown before it can
+  be pushed — nothing is ever guessed and written without a recorded match. For listings with
+  variations, each Etsy variation is matched to its Shopify variant by comparing option values
+  (e.g. "Size: Medium"), not SKU, since the SKU is exactly what's being replaced; if that match
+  isn't unambiguous the listing is skipped with a warning rather than risk writing a SKU to the
+  wrong variant. Updates only the SKU field — price, quantity, and everything else on the
+  listing is left untouched.
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.

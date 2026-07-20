@@ -232,6 +232,99 @@ export async function setListingSku(listingId: number, sku: string): Promise<voi
   }
 }
 
+export interface ListingInventoryProduct {
+  productId: number;
+  sku: string | null;
+  propertyValues: Array<{ propertyId: number; propertyName: string; valueIds: number[]; values: string[] }>;
+  offerings: Array<{ quantity: number; isEnabled: boolean; price: number; readinessStateId: number | null }>;
+}
+
+interface RawListingInventoryResponse {
+  products: Array<{
+    product_id: number;
+    sku: string | null;
+    is_deleted: boolean;
+    property_values: Array<{ property_id: number; property_name: string; value_ids: number[]; values: string[] }>;
+    offerings: Array<{
+      quantity: number;
+      is_enabled: boolean;
+      is_deleted: boolean;
+      price: { amount: number; divisor: number };
+      readiness_state_id: number | null;
+    }>;
+  }>;
+}
+
+/**
+ * Fetches a listing's full inventory (non-deleted products only), including SKU, variation
+ * property values, and offerings. Used to compute SKU diffs against Shopify without needing
+ * to know or reconstruct anything else about the listing.
+ */
+export async function getListingInventory(listingId: number): Promise<ListingInventoryProduct[]> {
+  const res = await etsyFetch(`/application/listings/${listingId}/inventory`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Etsy listing inventory ${listingId} (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as RawListingInventoryResponse;
+  return data.products
+    .filter((p) => !p.is_deleted)
+    .map((p) => ({
+      productId: p.product_id,
+      sku: p.sku,
+      propertyValues: p.property_values.map((pv) => ({
+        propertyId: pv.property_id,
+        propertyName: pv.property_name,
+        valueIds: pv.value_ids,
+        values: pv.values,
+      })),
+      offerings: p.offerings
+        .filter((o) => !o.is_deleted)
+        .map((o) => ({
+          quantity: o.quantity,
+          isEnabled: o.is_enabled,
+          price: o.price.amount / o.price.divisor,
+          readinessStateId: o.readiness_state_id,
+        })),
+    }));
+}
+
+/**
+ * Pushes new SKUs onto specific inventory products of an *existing* listing, keyed by Etsy's
+ * own product_id, preserving every other field (property values, offerings, price, quantity)
+ * exactly as Etsy currently has them. Products not present in `skuByProductId` keep their
+ * current SKU untouched. Used to re-sync SKUs after they've changed in Shopify, as opposed to
+ * setListingSku which only ever runs once, right after a brand-new draft is created.
+ */
+export async function updateListingSkus(listingId: number, skuByProductId: Map<number, string>): Promise<void> {
+  const products = await getListingInventory(listingId);
+  const putBody = {
+    products: products.map((p) => ({
+      sku: skuByProductId.get(p.productId) ?? p.sku ?? undefined,
+      property_values: p.propertyValues.map((pv) => ({
+        property_id: pv.propertyId,
+        property_name: pv.propertyName,
+        value_ids: pv.valueIds,
+        values: pv.values,
+      })),
+      offerings: p.offerings.map((o) => ({
+        quantity: o.quantity,
+        is_enabled: o.isEnabled,
+        price: o.price,
+        readiness_state_id: o.readinessStateId ?? undefined,
+      })),
+    })),
+  };
+
+  const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(putBody),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to update Etsy listing SKUs on ${listingId} (${res.status}): ${await res.text()}`);
+  }
+}
+
 export interface VariationProductInput {
   sku: string | null;
   price: number;

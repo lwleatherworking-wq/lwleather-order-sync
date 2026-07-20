@@ -19,6 +19,7 @@ import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
 import { getEtsyListingLink, recordEtsyListingLink } from "./db/etsyListingLinkStore.js";
 import { listProducts, getProductDetail, type ProductDetail } from "./shopify/products.js";
+import { analyzeEtsySkuSync, pushSkuDiffs, type ListingSyncStatus } from "./sync/etsySkuSync.js";
 import {
   getShippingProfiles,
   getSellerTaxonomyOptions,
@@ -290,10 +291,11 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
     <s-link href="/log">Log</s-link>
     <s-link href="/sku-linking">SKU Linking</s-link>
     <s-link href="/list-to-etsy">List to Etsy</s-link>
+    <s-link href="/sync-skus-to-etsy">Sync SKUs</s-link>
     <s-link href="/setup">Setup</s-link>
   </s-app-nav>
   <nav class="in-page">
-    <a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/setup">Setup</a>
+    <a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/sync-skus-to-etsy">Sync SKUs</a> · <a href="/setup">Setup</a>
     <span class="spacer"></span>
     <button type="button" id="theme-toggle"></button>
   </nav>
@@ -1429,6 +1431,273 @@ async function handleListToEtsyProductPost(url: URL, req: IncomingMessage, res: 
   }
 }
 
+function bucketOfStatus(s: ListingSyncStatus): "pushable" | "inSync" | "review" | "needsMatch" {
+  if (s.warning) return "review";
+  if (s.matchStatus === "linked") return s.diffs.some((d) => d.changed) ? "pushable" : "inSync";
+  return "needsMatch";
+}
+
+function etsyListingUrl(listingId: number): string {
+  return `https://www.etsy.com/your/shops/me/tools/listings/${listingId}`;
+}
+
+async function syncSkusPageHtml(params: {
+  message?: string;
+  messageIsError?: boolean;
+}): Promise<{ html: string; headers?: Record<string, string> }> {
+  const banner = params.message
+    ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
+    : "";
+
+  let analysis: Awaited<ReturnType<typeof analyzeEtsySkuSync>> | undefined;
+  let loadError: string | undefined;
+  try {
+    analysis = await analyzeEtsySkuSync(getShopId());
+  } catch (error) {
+    loadError =
+      error instanceof Error
+        ? error.message
+        : "Could not analyze Etsy listings. Make sure Etsy is connected via /oauth/etsy/start.";
+  }
+
+  if (loadError || !analysis) {
+    const bodyHtml = `<h1>Sync SKUs to Etsy</h1>${banner}<p class="banner error">${escapeHtml(loadError ?? "Unknown error")}</p>`;
+    return renderPage({ title: "Sync SKUs to Etsy", bodyHtml });
+  }
+
+  const { statuses, shopifyProducts } = analysis;
+
+  const pushable = statuses.filter((s) => bucketOfStatus(s) === "pushable");
+  const inSync = statuses.filter((s) => bucketOfStatus(s) === "inSync");
+  const review = statuses.filter((s) => bucketOfStatus(s) === "review");
+  const needsMatch = statuses.filter((s) => bucketOfStatus(s) === "needsMatch");
+  const totalChanged = pushable.reduce((sum, s) => sum + s.diffs.filter((d) => d.changed).length, 0);
+
+  const pushableRows = pushable
+    .map((s) => {
+      const diffLines = s.diffs
+        .filter((d) => d.changed)
+        .map(
+          (d) =>
+            `<div>${escapeHtml(d.variantLabel)}: <code>${escapeHtml(d.currentSku ?? "(none)")}</code> → <code>${escapeHtml(d.newSku)}</code></div>`
+        )
+        .join("");
+      return `<tr>
+        <td><a href="${etsyListingUrl(s.listingId)}" target="_blank" rel="noopener">${escapeHtml(s.listingTitle)}</a> <span class="hint">(${s.listingState})</span></td>
+        <td>${escapeHtml(s.matchedProductTitle ?? "")}</td>
+        <td>${diffLines}</td>
+        <td>
+          <form method="POST" action="/sync-skus-to-etsy/push">
+            <input type="hidden" name="action" value="push_one">
+            <input type="hidden" name="listingId" value="${s.listingId}">
+            <button type="submit">Push</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const needsMatchRows = [...needsMatch, ...review]
+    .map((s) => {
+      const skusText =
+        s.currentSkus.length > 0
+          ? s.currentSkus.map((sku) => `<code>${escapeHtml(sku)}</code>`).join(", ")
+          : `<span class="hint">none</span>`;
+      const suggestionHint =
+        s.matchStatus === "suggested"
+          ? `<p class="hint">Suggested by matching title: "${escapeHtml(s.matchedProductTitle ?? "")}"</p>`
+          : "";
+      const warningHint = s.warning ? `<p class="hint">${escapeHtml(s.warning)}</p>` : "";
+      return `<tr>
+        <td><a href="${etsyListingUrl(s.listingId)}" target="_blank" rel="noopener">${escapeHtml(s.listingTitle)}</a> <span class="hint">(${s.listingState})</span>${suggestionHint}${warningHint}</td>
+        <td>${skusText}</td>
+        <td>
+          <form method="POST" action="/sync-skus-to-etsy/link" class="inline-form">
+            <input type="hidden" name="listingId" value="${s.listingId}">
+            <select name="shopifyProductId" required>
+              <option value="">Pick a Shopify product…</option>
+              ${shopifyProducts
+                .map(
+                  (p) =>
+                    `<option value="${escapeHtml(p.id)}" ${p.id === s.matchedProductId ? "selected" : ""}>${escapeHtml(p.title)}</option>`
+                )
+                .join("")}
+            </select>
+            <button type="submit">Confirm match</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const inSyncRows = inSync
+    .map(
+      (s) =>
+        `<tr><td><a href="${etsyListingUrl(s.listingId)}" target="_blank" rel="noopener">${escapeHtml(s.listingTitle)}</a></td><td>${escapeHtml(s.matchedProductTitle ?? "")}</td></tr>`
+    )
+    .join("");
+
+  const bodyHtml = `
+  <h1>Sync SKUs to Etsy</h1>
+  <p>Compares each active/draft Etsy listing's SKU(s) to the Shopify product it's matched to, and
+  pushes an update so Etsy matches again — for after renaming SKUs in Shopify. A listing is
+  matched automatically if this app already links it (e.g. via "List to Etsy"), or by an exact
+  title match offered as a suggestion; anything else needs a manual pick below before it can be
+  pushed. Matching uses variation option values (e.g. "Size: Medium"), not SKU, since the SKU is
+  exactly what's being replaced.</p>
+
+  ${banner}
+
+  <h2>Ready to push (${pushable.length} listing(s), ${totalChanged} SKU change(s))</h2>
+  ${
+    pushable.length > 0
+      ? `<form method="POST" action="/sync-skus-to-etsy/push">
+          <input type="hidden" name="action" value="push_all">
+          <button type="submit">Push all ${totalChanged} SKU change(s)</button>
+        </form>
+        <table>
+          <tr><th>Etsy listing</th><th>Shopify product</th><th>SKU changes</th><th></th></tr>
+          ${pushableRows}
+        </table>`
+      : `<p>Nothing to push — every linked listing's SKU(s) already match Shopify.</p>`
+  }
+
+  <h2>Needs matching (${needsMatch.length + review.length})</h2>
+  ${
+    needsMatch.length + review.length > 0
+      ? `<table>
+          <tr><th>Etsy listing</th><th>Current Etsy SKU(s)</th><th>Match to Shopify product</th></tr>
+          ${needsMatchRows}
+        </table>`
+      : `<p>Nothing left to match.</p>`
+  }
+
+  <h2>Already in sync (${inSync.length})</h2>
+  ${
+    inSync.length > 0
+      ? `<details>
+          <summary>Show all ${inSync.length}</summary>
+          <table>
+            <tr><th>Etsy listing</th><th>Shopify product</th></tr>
+            ${inSyncRows}
+          </table>
+        </details>`
+      : `<p>None yet.</p>`
+  }`;
+
+  return renderPage({ title: "Sync SKUs to Etsy", bodyHtml });
+}
+
+function handleSyncSkusGet(res: ServerResponse): Promise<void> {
+  return syncSkusPageHtml({}).then(({ html, headers }) => sendHtml(res, 200, html, headers));
+}
+
+async function handleSyncSkusLinkPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const listingId = params.get("listingId");
+  const shopifyProductId = params.get("shopifyProductId");
+
+  if (!listingId || !shopifyProductId) {
+    const { html, headers } = await syncSkusPageHtml({
+      message: "Pick a Shopify product to confirm the match.",
+      messageIsError: true,
+    });
+    sendHtml(res, 400, html, headers);
+    return;
+  }
+
+  recordEtsyListingLink(shopifyProductId, listingId);
+  logger.info("Confirmed Etsy listing ↔ Shopify product match via /sync-skus-to-etsy", { listingId, shopifyProductId });
+  const { html, headers } = await syncSkusPageHtml({
+    message: `Matched listing #${listingId}. Review the SKU diff below before pushing.`,
+  });
+  sendHtml(res, 200, html, headers);
+}
+
+async function handleSyncSkusPushPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const action = params.get("action");
+  const shopId = getShopId();
+
+  if (action === "push_one") {
+    const listingIdRaw = params.get("listingId");
+    const listingId = listingIdRaw ? Number(listingIdRaw) : NaN;
+    if (!Number.isFinite(listingId)) {
+      const { html, headers } = await syncSkusPageHtml({ message: "Missing listing id.", messageIsError: true });
+      sendHtml(res, 400, html, headers);
+      return;
+    }
+    try {
+      // Re-analyze just this listing right before writing, rather than trusting the diff a
+      // hidden form field carried from an earlier page load — Etsy/Shopify state may have
+      // moved on since then.
+      const { statuses } = await analyzeEtsySkuSync(shopId, listingId);
+      const status = statuses[0];
+      if (!status || status.matchStatus !== "linked") {
+        const { html, headers } = await syncSkusPageHtml({
+          message: `Listing #${listingId} isn't in a pushable state anymore — reload and check.`,
+          messageIsError: true,
+        });
+        sendHtml(res, 200, html, headers);
+        return;
+      }
+      const pushed = await pushSkuDiffs(status);
+      const { html, headers } = await syncSkusPageHtml({
+        message:
+          pushed > 0
+            ? `Pushed ${pushed} SKU update(s) to listing #${listingId}.`
+            : `Listing #${listingId} was already in sync — nothing to push.`,
+      });
+      sendHtml(res, 200, html, headers);
+    } catch (error) {
+      logger.error("Failed to push Etsy SKU update", {
+        listingId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      const { html, headers } = await syncSkusPageHtml({
+        message: error instanceof Error ? error.message : "Failed to push SKU update.",
+        messageIsError: true,
+      });
+      sendHtml(res, 200, html, headers);
+    }
+    return;
+  }
+
+  if (action === "push_all") {
+    const { statuses } = await analyzeEtsySkuSync(shopId);
+    const pushableNow = statuses.filter((s) => s.matchStatus === "linked" && s.diffs.some((d) => d.changed));
+    let succeeded = 0;
+    let failed = 0;
+    let skusPushed = 0;
+    for (const status of pushableNow) {
+      try {
+        skusPushed += await pushSkuDiffs(status);
+        succeeded++;
+      } catch (error) {
+        failed++;
+        logger.error("Failed to push Etsy SKU update during push_all", {
+          listingId: status.listingId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const { html, headers } = await syncSkusPageHtml({
+      message:
+        failed === 0
+          ? `Pushed ${skusPushed} SKU update(s) across ${succeeded} listing(s).`
+          : `Pushed ${skusPushed} SKU update(s) across ${succeeded} listing(s); ${failed} listing(s) failed — check logs.`,
+      messageIsError: failed > 0 && succeeded === 0,
+    });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
+  const { html, headers } = await syncSkusPageHtml({ message: "Unknown action.", messageIsError: true });
+  sendHtml(res, 400, html, headers);
+}
+
 interface SetupField {
   key: OverridableKey;
   label: string;
@@ -1587,6 +1856,9 @@ export function startServer(): void {
         if (url.pathname === "/list-to-etsy/product") return handleListToEtsyProductGet(url, res);
         if (url.pathname === "/list-to-etsy/etsy-properties") return handleEtsyPropertiesGet(url, res);
         if (url.pathname === "/list-to-etsy") return handleListToEtsyGet(res);
+        if (url.pathname === "/sync-skus-to-etsy/link" && req.method === "POST") return handleSyncSkusLinkPost(req, res);
+        if (url.pathname === "/sync-skus-to-etsy/push" && req.method === "POST") return handleSyncSkusPushPost(req, res);
+        if (url.pathname === "/sync-skus-to-etsy") return handleSyncSkusGet(res);
         if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");

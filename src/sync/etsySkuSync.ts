@@ -1,0 +1,200 @@
+import { getListingsByState } from "../etsy/listings.js";
+import { getListingInventory, updateListingSkus, type ListingInventoryProduct } from "../etsy/shopListings.js";
+import { listProductsWithVariants, type ProductWithVariants, type ProductVariant } from "../shopify/products.js";
+import { listEtsyListingLinks } from "../db/etsyListingLinkStore.js";
+
+export interface SkuDiff {
+  productId: number; // Etsy inventory product id
+  variantLabel: string; // e.g. "Size: Medium", or "—" for a listing with no variations
+  currentSku: string | null;
+  newSku: string;
+  changed: boolean;
+}
+
+export type MatchStatus = "linked" | "suggested" | "unmatched" | "ambiguous";
+
+export interface ListingSyncStatus {
+  listingId: number;
+  listingTitle: string;
+  listingState: "active" | "draft";
+  matchStatus: MatchStatus;
+  matchedProductId: string | null;
+  matchedProductTitle: string | null;
+  currentSkus: string[];
+  diffs: SkuDiff[];
+  warning: string | null;
+}
+
+export interface SyncAnalysis {
+  statuses: ListingSyncStatus[];
+  shopifyProducts: ProductWithVariants[];
+}
+
+function variantLabel(variant: ProductVariant): string {
+  return variant.selectedOptions.map((o) => `${o.name}: ${o.value}`).join(", ") || "—";
+}
+
+/**
+ * True if an Etsy inventory product's variation property values are the same set of text
+ * values as a Shopify variant's selected options (order-independent, case-insensitive).
+ */
+function propertyValuesMatchVariant(inv: ListingInventoryProduct, variant: ProductVariant): boolean {
+  const invValues = inv.propertyValues.flatMap((pv) => pv.values.map((v) => v.toLowerCase().trim()));
+  const variantValues = variant.selectedOptions.map((o) => o.value.toLowerCase().trim());
+  if (invValues.length !== variantValues.length) return false;
+  const sortedA = [...invValues].sort();
+  const sortedB = [...variantValues].sort();
+  return sortedA.every((v, i) => v === sortedB[i]);
+}
+
+/**
+ * Matches each Etsy inventory product (one per variation combo, or a single one for a listing
+ * with no variations) to the Shopify variant it corresponds to. Matches by variation property
+ * values rather than SKU, since the SKU is exactly what's being changed and so can't be used to
+ * find its own match. Returns null if the match isn't unambiguous — callers must not push SKUs
+ * in that case, since a wrong guess would silently scramble which SKU lands on which variant.
+ */
+function matchInventoryToVariants(
+  inventory: ListingInventoryProduct[],
+  variants: ProductVariant[]
+): Map<number, ProductVariant> | null {
+  if (inventory.length === 1 && variants.length === 1) {
+    return new Map([[inventory[0].productId, variants[0]]]);
+  }
+  if (inventory.length !== variants.length) return null;
+
+  const result = new Map<number, ProductVariant>();
+  const usedVariantIndexes = new Set<number>();
+  for (const inv of inventory) {
+    const candidates = variants
+      .map((v, i) => ({ v, i }))
+      .filter(({ v, i }) => !usedVariantIndexes.has(i) && propertyValuesMatchVariant(inv, v));
+    if (candidates.length !== 1) return null;
+    result.set(inv.productId, candidates[0]!.v);
+    usedVariantIndexes.add(candidates[0]!.i);
+  }
+  return result;
+}
+
+function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, ProductVariant>): SkuDiff[] {
+  return inventory.map((inv) => {
+    const variant = mapping.get(inv.productId)!;
+    const newSku = variant.sku ?? "";
+    return {
+      productId: inv.productId,
+      variantLabel: variantLabel(variant),
+      currentSku: inv.sku,
+      newSku,
+      // A Shopify variant with no SKU of its own is never pushed — there's nothing to sync it to.
+      changed: newSku !== "" && newSku !== (inv.sku ?? ""),
+    };
+  });
+}
+
+/**
+ * Compares every active/draft Etsy listing's SKU(s) against the Shopify product it's matched
+ * to, and reports what would change. Matching precedence: an explicit link recorded by this
+ * app (e.g. from "List to Etsy", or a previously confirmed match here) wins; otherwise an exact
+ * (case-insensitive) title match is offered as a suggestion only, never applied automatically.
+ *
+ * Pass `onlyListingId` to analyze a single listing cheaply (used by the push routes to
+ * re-verify right before writing, instead of trusting a stale value from a submitted form).
+ */
+export async function analyzeEtsySkuSync(shopId: string, onlyListingId?: number): Promise<SyncAnalysis> {
+  const [activeListings, draftListings, shopifyProducts, links] = await Promise.all([
+    getListingsByState(shopId, "active"),
+    getListingsByState(shopId, "draft"),
+    listProductsWithVariants(),
+    Promise.resolve(listEtsyListingLinks()),
+  ]);
+  const listings = (
+    onlyListingId
+      ? [...activeListings, ...draftListings].filter((l) => l.listingId === onlyListingId)
+      : [...activeListings, ...draftListings]
+  );
+
+  const linkedListingToProduct = new Map(links.map((l) => [l.etsyListingId, l.shopifyProductId]));
+  const productById = new Map(shopifyProducts.map((p) => [p.id, p]));
+  const productByTitleLower = new Map(shopifyProducts.map((p) => [p.title.toLowerCase().trim(), p]));
+
+  const statuses: ListingSyncStatus[] = [];
+
+  for (const listing of listings) {
+    const linkedProductId = linkedListingToProduct.get(String(listing.listingId));
+    let matchStatus: MatchStatus;
+    let matchedProduct: ProductWithVariants | undefined;
+
+    if (linkedProductId) {
+      matchedProduct = productById.get(linkedProductId);
+      matchStatus = matchedProduct ? "linked" : "unmatched";
+    } else {
+      matchedProduct = productByTitleLower.get(listing.title.toLowerCase().trim());
+      matchStatus = matchedProduct ? "suggested" : "unmatched";
+    }
+
+    const inventory = await getListingInventory(listing.listingId);
+    const currentSkus = inventory.map((p) => p.sku).filter((sku): sku is string => Boolean(sku));
+
+    if (!matchedProduct) {
+      statuses.push({
+        listingId: listing.listingId,
+        listingTitle: listing.title,
+        listingState: listing.state,
+        matchStatus: "unmatched",
+        matchedProductId: null,
+        matchedProductTitle: null,
+        currentSkus,
+        diffs: [],
+        warning: null,
+      });
+      continue;
+    }
+
+    const mapping = matchInventoryToVariants(inventory, matchedProduct.variants);
+
+    if (!mapping) {
+      statuses.push({
+        listingId: listing.listingId,
+        listingTitle: listing.title,
+        listingState: listing.state,
+        matchStatus: matchStatus === "linked" ? "linked" : "ambiguous",
+        matchedProductId: matchedProduct.id,
+        matchedProductTitle: matchedProduct.title,
+        currentSkus,
+        diffs: [],
+        warning:
+          matchStatus === "linked"
+            ? `Linked product's variants (${matchedProduct.variants.length}) don't line up 1:1 with this listing's Etsy variations (${inventory.length}) — skipped, needs a manual look.`
+            : "Couldn't confidently match Etsy variations to Shopify variants by option values — skipped.",
+      });
+      continue;
+    }
+
+    statuses.push({
+      listingId: listing.listingId,
+      listingTitle: listing.title,
+      listingState: listing.state,
+      matchStatus,
+      matchedProductId: matchedProduct.id,
+      matchedProductTitle: matchedProduct.title,
+      currentSkus,
+      diffs: buildDiffs(inventory, mapping),
+      warning: null,
+    });
+  }
+
+  return { statuses, shopifyProducts };
+}
+
+/**
+ * Pushes only the changed SKU diffs for one already-analyzed listing. Returns the number of
+ * SKUs actually pushed (0 if there was nothing to change — callers should treat that as a
+ * no-op, not an error).
+ */
+export async function pushSkuDiffs(status: ListingSyncStatus): Promise<number> {
+  const changed = status.diffs.filter((d) => d.changed);
+  if (changed.length === 0) return 0;
+  const skuByProductId = new Map(changed.map((d) => [d.productId, d.newSku]));
+  await updateListingSkus(status.listingId, skuByProductId);
+  return changed.length;
+}
