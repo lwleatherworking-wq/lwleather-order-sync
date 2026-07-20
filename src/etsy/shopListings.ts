@@ -408,6 +408,14 @@ export async function setListingVariations(
   products: VariationProductInput[],
   readinessStateId: number
 ): Promise<void> {
+  // Etsy rejects the request if two products have a different price/quantity/sku without
+  // explicitly being told which property that's allowed to vary by — every mapped property is
+  // declared here for all three, since each Shopify variant independently carries its own
+  // sku/price/quantity regardless of which specific property changed between variants.
+  const mappedPropertyIds = Array.from(
+    new Set(products.flatMap((p) => p.propertyValues.map((pv) => pv.propertyId)))
+  );
+
   const putBody = {
     products: products.map((p) => ({
       sku: p.sku ?? undefined,
@@ -426,6 +434,9 @@ export async function setListingVariations(
         },
       ],
     })),
+    price_on_property: mappedPropertyIds,
+    quantity_on_property: mappedPropertyIds,
+    sku_on_property: mappedPropertyIds,
   };
 
   const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
