@@ -122,6 +122,22 @@ function matchByKey(
 }
 
 /**
+ * Finds the single Shopify variant whose selected-option values match `values` (an arbitrary
+ * list of variation text, e.g. from an Etsy order's line-item variations), trying an exact
+ * text match first and falling back to the coarser label match (see `looseKey`). Returns null
+ * if no variant matches or more than one does — used to suggest, never silently assume, a
+ * match for an order with no SKU to go on at all.
+ */
+export function findMatchingVariant(values: string[], variants: ProductVariant[]): ProductVariant | null {
+  for (const keyFn of [exactKey, looseKey]) {
+    const targetKeys = values.map(keyFn);
+    const matches = variants.filter((v) => valueSetsMatch(targetKeys, variantValueSet(v, keyFn)));
+    if (matches.length === 1) return matches[0]!;
+  }
+  return null;
+}
+
+/**
  * Matches each Etsy inventory product (one per variation combo, or a single one for a listing
  * with no variations) to the Shopify variant it corresponds to. Matches by variation property
  * values rather than SKU, since the SKU is exactly what's being changed and so can't be used to

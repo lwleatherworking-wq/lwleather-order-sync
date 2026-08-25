@@ -9,6 +9,13 @@ export function moneyToDecimalString(money: EtsyMoney): string {
   return (money.amount / money.divisor).toFixed(2);
 }
 
+export interface EtsyTransactionVariation {
+  property_id: number;
+  value_id: number | null;
+  formatted_name: string;
+  formatted_value: string;
+}
+
 export interface EtsyTransaction {
   transaction_id: number;
   title: string | null;
@@ -19,6 +26,7 @@ export interface EtsyTransaction {
   sku: string | null;
   price: EtsyMoney;
   shipping_cost: EtsyMoney;
+  variations: EtsyTransactionVariation[];
 }
 
 export interface EtsyShipment {

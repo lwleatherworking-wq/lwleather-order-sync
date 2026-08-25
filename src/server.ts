@@ -17,15 +17,16 @@ import { clearCachedShopifyToken } from "./shopify/apiClient.js";
 import { findVariantBySku, listShopifySkus } from "./shopify/variantLookup.js";
 import { getFlaggedReceipts, getSyncedReceipts } from "./db/receiptStore.js";
 import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLinkStore.js";
-import { getEtsyListingLink, recordEtsyListingLink, deleteEtsyListingLink } from "./db/etsyListingLinkStore.js";
-import { listProducts, getProductDetail, type ProductDetail } from "./shopify/products.js";
-import { analyzeEtsySkuSync, pushSkuDiffs, type ListingSyncStatus } from "./sync/etsySkuSync.js";
+import { getEtsyListingLink, recordEtsyListingLink, deleteEtsyListingLink, listEtsyListingLinks } from "./db/etsyListingLinkStore.js";
+import { listProducts, getProductDetail, listProductsWithVariants, type ProductDetail } from "./shopify/products.js";
+import { analyzeEtsySkuSync, pushSkuDiffs, findMatchingVariant, type ListingSyncStatus } from "./sync/etsySkuSync.js";
 import { getReceiptById } from "./etsy/receipts.js";
 import { moneyToDecimalString } from "./etsy/types.js";
 import { getShopCurrencyCode } from "./shopify/shopInfo.js";
 import { resolveLineItems } from "./sync/mapping.js";
 import { syncOneReceipt } from "./sync/syncOnce.js";
 import { flagUnmatchedSkus, flagError } from "./sync/reviewQueue.js";
+import { setTransactionOverride } from "./db/transactionOverrideStore.js";
 import {
   getShippingProfiles,
   getSellerTaxonomyOptions,
@@ -1893,11 +1894,18 @@ async function handleSyncSkusPushPost(req: IncomingMessage, res: ServerResponse)
 }
 
 interface ReviewLineItem {
+  transactionId: number;
   title: string;
   sku: string | null;
   quantity: number;
   resolved: boolean;
   unresolvedReason: "missing_sku" | "sku_not_found" | null;
+  // Only set for missing_sku lines: what was actually purchased (e.g. "Size: Medium"), and a
+  // best-guess Shopify SKU for it — matched by variation text against the Shopify product this
+  // Etsy listing is linked to, the same way /sync-skus-to-etsy matches variants. Always shown
+  // as a pre-filled suggestion the user confirms, never applied automatically.
+  variationsDescription: string | null;
+  suggestedSku: string | null;
 }
 
 interface ReviewOrderItem {
@@ -1923,6 +1931,16 @@ async function buildReviewOrderItems(shopId: string): Promise<ReviewOrderItem[]>
   const flagged = getFlaggedReceipts();
   const items: ReviewOrderItem[] = [];
 
+  // Computed once and shared across every flagged receipt below, rather than per line item —
+  // used to suggest a Shopify SKU for a transaction with no SKU at all, by matching its
+  // purchased variation text against the Shopify product this Etsy listing is linked to.
+  const [shopifyProducts, listingLinks] = await Promise.all([
+    listProductsWithVariants(),
+    Promise.resolve(listEtsyListingLinks()),
+  ]);
+  const productById = new Map(shopifyProducts.map((p) => [p.id, p]));
+  const productIdByEtsyListingId = new Map(listingLinks.map((l) => [l.etsyListingId, l.shopifyProductId]));
+
   for (const f of flagged) {
     try {
       const receipt = await getReceiptById(shopId, f.etsyReceiptId);
@@ -1931,12 +1949,34 @@ async function buildReviewOrderItems(shopId: string): Promise<ReviewOrderItem[]>
 
       const lines: ReviewLineItem[] = receipt.transactions.map((txn) => {
         const unresolvedLine = unresolvedByTxnId.get(txn.transaction_id);
+        let variationsDescription: string | null = null;
+        let suggestedSku: string | null = null;
+
+        if (unresolvedLine?.reason === "missing_sku") {
+          variationsDescription =
+            txn.variations.length > 0
+              ? txn.variations.map((v) => `${v.formatted_name}: ${v.formatted_value}`).join(", ")
+              : null;
+          const shopifyProductId = txn.listing_id ? productIdByEtsyListingId.get(String(txn.listing_id)) : undefined;
+          const product = shopifyProductId ? productById.get(shopifyProductId) : undefined;
+          if (product && txn.variations.length > 0) {
+            const match = findMatchingVariant(
+              txn.variations.map((v) => v.formatted_value),
+              product.variants
+            );
+            suggestedSku = match?.sku ?? null;
+          }
+        }
+
         return {
+          transactionId: txn.transaction_id,
           title: txn.title ?? "(no title)",
           sku: txn.sku,
           quantity: txn.quantity,
           resolved: !unresolvedLine,
           unresolvedReason: unresolvedLine?.reason ?? null,
+          variationsDescription,
+          suggestedSku,
         };
       });
 
@@ -2008,7 +2048,14 @@ function renderReviewItem(item: ReviewOrderItem): string {
               <button type="submit">Link</button>
             </form>`
           : !line.resolved && line.unresolvedReason === "missing_sku"
-            ? `<p class="hint">This Etsy line item has no SKU set at all — set one on the Etsy listing itself, then this resolves automatically.</p>`
+            ? `<p class="hint">${
+                line.variationsDescription ? `Purchased: ${escapeHtml(line.variationsDescription)}. ` : ""
+              }No SKU was set on Etsy at the time this was ordered — pick the matching Shopify SKU below to resolve just this order (won't affect future ones, which should have real SKUs now).</p>
+              <form method="POST" action="/orders-needing-review/link-transaction" class="inline-form">
+                <input type="hidden" name="transactionId" value="${line.transactionId}">
+                <input type="text" name="shopifySku" list="review-shopify-sku-options" placeholder="Matching Shopify SKU" value="${escapeHtml(line.suggestedSku ?? "")}" required>
+                <button type="submit">${line.suggestedSku ? "Confirm match" : "Link"}</button>
+              </form>`
             : "";
       return `<tr>
         <td>${escapeHtml(line.title)}</td>
@@ -2120,6 +2167,42 @@ async function handleReviewOrdersLinkPost(req: IncomingMessage, res: ServerRespo
   logger.info("SKU link saved via /orders-needing-review", { etsySku, shopifySku });
   const { html, headers } = await reviewOrdersPageHtml({
     message: `Linked Etsy SKU "${etsySku}" to Shopify SKU "${shopifySku}". Click "Sync now" below once every line item shows Matched.`,
+  });
+  sendHtml(res, 200, html, headers);
+}
+
+/** Resolves a single Etsy transaction that had no SKU at all (see transaction_overrides) —
+ * distinct from handleReviewOrdersLinkPost, which links a real Etsy SKU that just doesn't
+ * match Shopify. This one only ever affects the one order it's set for. */
+async function handleReviewOrdersLinkTransactionPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const transactionId = params.get("transactionId")?.trim();
+  const shopifySku = params.get("shopifySku")?.trim();
+
+  if (!transactionId || !shopifySku) {
+    const { html, headers } = await reviewOrdersPageHtml({
+      message: "A Shopify SKU is required.",
+      messageIsError: true,
+    });
+    sendHtml(res, 400, html, headers);
+    return;
+  }
+
+  const variant = await findVariantBySku(shopifySku);
+  if (!variant) {
+    const { html, headers } = await reviewOrdersPageHtml({
+      message: `No Shopify variant found with SKU "${shopifySku}" — not saved.`,
+      messageIsError: true,
+    });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
+  setTransactionOverride(transactionId, shopifySku);
+  logger.info("Transaction override saved via /orders-needing-review", { transactionId, shopifySku });
+  const { html, headers } = await reviewOrdersPageHtml({
+    message: `Resolved this order's line item to Shopify SKU "${shopifySku}". Click "Sync now" below once every line item shows Matched.`,
   });
   sendHtml(res, 200, html, headers);
 }
@@ -2337,6 +2420,7 @@ export function startServer(): void {
         if (url.pathname === "/sync-skus-to-etsy/push" && req.method === "POST") return handleSyncSkusPushPost(req, res);
         if (url.pathname === "/sync-skus-to-etsy") return handleSyncSkusGet(res);
         if (url.pathname === "/orders-needing-review/link" && req.method === "POST") return handleReviewOrdersLinkPost(req, res);
+        if (url.pathname === "/orders-needing-review/link-transaction" && req.method === "POST") return handleReviewOrdersLinkTransactionPost(req, res);
         if (url.pathname === "/orders-needing-review/retry" && req.method === "POST") return handleReviewOrdersRetryPost(req, res);
         if (url.pathname === "/orders-needing-review") return handleReviewOrdersGet(res);
         if (url.pathname === "/log") return handleLogPage(res);

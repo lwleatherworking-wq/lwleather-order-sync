@@ -2,6 +2,7 @@ import type { EtsyReceipt } from "../etsy/types.js";
 import { moneyToDecimalString } from "../etsy/types.js";
 import { findVariantBySku } from "../shopify/variantLookup.js";
 import { getSkuLink } from "../db/skuLinkStore.js";
+import { getTransactionOverride } from "../db/transactionOverrideStore.js";
 import type { ResolvedLineItem } from "../shopify/orders.js";
 
 export interface UnresolvedLine {
@@ -25,7 +26,20 @@ export async function resolveLineItems(receipt: EtsyReceipt): Promise<ResolvedLi
 
   for (const txn of receipt.transactions) {
     if (!txn.sku) {
-      unresolved.push({ transactionId: txn.transaction_id, sku: null, reason: "missing_sku" });
+      // A per-transaction override from /orders-needing-review resolves an order placed
+      // while the listing genuinely had no SKU set yet — there's no Etsy SKU to link from,
+      // so this is the only way such a transaction can ever resolve.
+      const overrideSku = getTransactionOverride(String(txn.transaction_id));
+      if (!overrideSku) {
+        unresolved.push({ transactionId: txn.transaction_id, sku: null, reason: "missing_sku" });
+        continue;
+      }
+      const overrideVariant = await findVariantBySku(overrideSku);
+      if (!overrideVariant) {
+        unresolved.push({ transactionId: txn.transaction_id, sku: null, reason: "missing_sku" });
+        continue;
+      }
+      resolved.push({ variant: overrideVariant, quantity: txn.quantity, unitPrice: moneyToDecimalString(txn.price) });
       continue;
     }
     // A manual override from /sku-linking takes precedence over the exact-match lookup,

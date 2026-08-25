@@ -51,3 +51,14 @@ CREATE TABLE IF NOT EXISTS etsy_listing_links (
   etsy_listing_id TEXT NOT NULL,
   created_at INTEGER NOT NULL -- unix ms
 );
+
+-- Manual overrides for a single Etsy transaction that has no SKU at all (as opposed to
+-- sku_links, which is keyed by an Etsy SKU that exists but doesn't match Shopify). Needed
+-- for orders placed while a listing genuinely had no SKU set yet — there's nothing to key a
+-- link off on the Etsy side, so this is keyed by the transaction itself and only ever
+-- resolves that one order, not future ones.
+CREATE TABLE IF NOT EXISTS transaction_overrides (
+  etsy_transaction_id TEXT PRIMARY KEY,
+  shopify_sku TEXT NOT NULL,
+  created_at INTEGER NOT NULL -- unix ms
+);
