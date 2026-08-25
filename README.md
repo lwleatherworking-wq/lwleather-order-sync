@@ -140,6 +140,16 @@ orders going forward, not import your whole order history. To pull in older orde
   isn't unambiguous the listing is skipped with a warning rather than risk writing a SKU to the
   wrong variant. Updates only the SKU field — price, quantity, and everything else on the
   listing is left untouched.
+- **`/orders-needing-review`** — a working view of every Etsy order flagged by the sync (see
+  "Needs review" on the status page), for resolving them without waiting on the automatic sync
+  tick. Each order shows its line items with a live re-check against Shopify's *current* data
+  (not the stale snapshot from when it was flagged), so a SKU you just fixed via `/sku-linking`
+  shows up as matched immediately. A line item with an Etsy SKU that doesn't match anything in
+  Shopify gets an inline "Link to Shopify SKU" form right there; a line item with no SKU set on
+  Etsy at all can't be linked (there's nothing to link) and needs a SKU set on the Etsy listing
+  itself first. Once every line item is matched, "Sync now" creates the Shopify order
+  immediately — the same order-creation logic the scheduler uses, just triggered on demand for
+  one specific receipt instead of waiting for the next tick.
 - **`/setup`** — configure (or change) Etsy/Shopify credentials, the store domain,
   public URL, sync interval, dry-run toggle, and backfill date without touching
   Railway's dashboard or redeploying — protected by the `SETUP_PASSWORD` env var.

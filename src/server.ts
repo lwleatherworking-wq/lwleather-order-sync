@@ -20,6 +20,12 @@ import { getSkuLink, setSkuLink, deleteSkuLink, listSkuLinks } from "./db/skuLin
 import { getEtsyListingLink, recordEtsyListingLink, deleteEtsyListingLink } from "./db/etsyListingLinkStore.js";
 import { listProducts, getProductDetail, type ProductDetail } from "./shopify/products.js";
 import { analyzeEtsySkuSync, pushSkuDiffs, type ListingSyncStatus } from "./sync/etsySkuSync.js";
+import { getReceiptById } from "./etsy/receipts.js";
+import { moneyToDecimalString } from "./etsy/types.js";
+import { getShopCurrencyCode } from "./shopify/shopInfo.js";
+import { resolveLineItems } from "./sync/mapping.js";
+import { syncOneReceipt } from "./sync/syncOnce.js";
+import { flagUnmatchedSkus, flagError } from "./sync/reviewQueue.js";
 import {
   getShippingProfiles,
   getSellerTaxonomyOptions,
@@ -231,6 +237,8 @@ const SHARED_STYLE = `
     .combobox-result.combobox-empty { color: var(--muted-fg); cursor: default; }
     .combobox-result.combobox-empty:hover { background: none; }
     .combobox-result mark { background: var(--mark-bg); color: inherit; padding: 0; border-radius: 2px; }
+    .review-item { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+    .review-item h2 { margin-top: 0; }
 `;
 
 // Runs before first paint so the page never flashes the wrong theme: an explicit
@@ -295,10 +303,11 @@ function renderPage(params: { title: string; bodyHtml: string; refreshSeconds?: 
     <s-link href="/sku-linking">SKU Linking</s-link>
     <s-link href="/list-to-etsy">List to Etsy</s-link>
     <s-link href="/sync-skus-to-etsy">Sync SKUs</s-link>
+    <s-link href="/orders-needing-review">Orders Needing Review</s-link>
     <s-link href="/setup">Setup</s-link>
   </s-app-nav>
   <nav class="in-page">
-    <a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/sync-skus-to-etsy">Sync SKUs</a> · <a href="/setup">Setup</a>
+    <a href="/">Status</a> · <a href="/log">Log</a> · <a href="/sku-linking">SKU Linking</a> · <a href="/list-to-etsy">List to Etsy</a> · <a href="/sync-skus-to-etsy">Sync SKUs</a> · <a href="/orders-needing-review">Orders Needing Review</a> · <a href="/setup">Setup</a>
     <span class="spacer"></span>
     <button type="button" id="theme-toggle"></button>
   </nav>
@@ -1883,6 +1892,288 @@ async function handleSyncSkusPushPost(req: IncomingMessage, res: ServerResponse)
   sendHtml(res, 400, html, headers);
 }
 
+interface ReviewLineItem {
+  title: string;
+  sku: string | null;
+  quantity: number;
+  resolved: boolean;
+  unresolvedReason: "missing_sku" | "sku_not_found" | null;
+}
+
+interface ReviewOrderItem {
+  etsyReceiptId: string;
+  status: string;
+  storedReason: string | null;
+  storedErrorDetail: string | null;
+  flaggedAt: number;
+  loadError: string | null;
+  buyerName: string | null;
+  total: string | null;
+  createdAt: number | null;
+  lines: ReviewLineItem[];
+  allResolved: boolean;
+}
+
+/**
+ * Builds a rich, live view of every flagged receipt: fresh detail from Etsy plus a fresh
+ * SKU-resolution check against Shopify's *current* state — not the JSON snapshot captured at
+ * flag time, which would still show a line as unmatched even after its SKU link was fixed.
+ */
+async function buildReviewOrderItems(shopId: string): Promise<ReviewOrderItem[]> {
+  const flagged = getFlaggedReceipts();
+  const items: ReviewOrderItem[] = [];
+
+  for (const f of flagged) {
+    try {
+      const receipt = await getReceiptById(shopId, f.etsyReceiptId);
+      const { unresolved } = await resolveLineItems(receipt);
+      const unresolvedByTxnId = new Map(unresolved.map((u) => [u.transactionId, u]));
+
+      const lines: ReviewLineItem[] = receipt.transactions.map((txn) => {
+        const unresolvedLine = unresolvedByTxnId.get(txn.transaction_id);
+        return {
+          title: txn.title ?? "(no title)",
+          sku: txn.sku,
+          quantity: txn.quantity,
+          resolved: !unresolvedLine,
+          unresolvedReason: unresolvedLine?.reason ?? null,
+        };
+      });
+
+      items.push({
+        etsyReceiptId: f.etsyReceiptId,
+        status: f.status,
+        storedReason: f.reason,
+        storedErrorDetail: f.errorDetail,
+        flaggedAt: f.syncedAt,
+        loadError: null,
+        buyerName: receipt.name,
+        total: `${moneyToDecimalString(receipt.grandtotal)} ${receipt.grandtotal.currency_code}`,
+        createdAt: receipt.created_timestamp,
+        lines,
+        allResolved: unresolved.length === 0,
+      });
+    } catch (error) {
+      items.push({
+        etsyReceiptId: f.etsyReceiptId,
+        status: f.status,
+        storedReason: f.reason,
+        storedErrorDetail: f.errorDetail,
+        flaggedAt: f.syncedAt,
+        loadError: error instanceof Error ? error.message : "Failed to load this receipt from Etsy.",
+        buyerName: null,
+        total: null,
+        createdAt: null,
+        lines: [],
+        allResolved: false,
+      });
+    }
+  }
+
+  return items;
+}
+
+function renderReviewItem(item: ReviewOrderItem): string {
+  const header = `
+    <h2>Receipt #${escapeHtml(item.etsyReceiptId)}${item.buyerName ? ` — ${escapeHtml(item.buyerName)}` : ""}</h2>
+    <dl>
+      ${item.total ? `<dt>Total</dt><dd>${escapeHtml(item.total)}</dd>` : ""}
+      ${item.createdAt ? `<dt>Order date</dt><dd>${formatTimestamp(item.createdAt * 1000)}</dd>` : ""}
+      <dt>Flagged</dt><dd>${formatTimestamp(item.flaggedAt)} — ${escapeHtml(item.status)}${item.storedReason ? ` (${escapeHtml(item.storedReason)})` : ""}</dd>
+    </dl>`;
+
+  if (item.loadError) {
+    return `<div class="review-item">
+      ${header}
+      <p class="banner error">Couldn't load this receipt from Etsy: ${escapeHtml(item.loadError)}</p>
+      <form method="POST" action="/orders-needing-review/retry">
+        <input type="hidden" name="receiptId" value="${escapeHtml(item.etsyReceiptId)}">
+        <button type="submit">Try again</button>
+      </form>
+    </div>`;
+  }
+
+  const linesRows = item.lines
+    .map((line) => {
+      const statusCell = line.resolved
+        ? `<span class="badge ok">Matched</span>`
+        : line.unresolvedReason === "missing_sku"
+          ? `<span class="badge bad">No SKU on Etsy</span>`
+          : `<span class="badge bad">Not found in Shopify</span>`;
+      const linkForm =
+        !line.resolved && line.unresolvedReason === "sku_not_found" && line.sku
+          ? `<form method="POST" action="/orders-needing-review/link" class="inline-form">
+              <input type="hidden" name="etsySku" value="${escapeHtml(line.sku)}">
+              <input type="text" name="shopifySku" list="review-shopify-sku-options" placeholder="Link to Shopify SKU" required>
+              <button type="submit">Link</button>
+            </form>`
+          : !line.resolved && line.unresolvedReason === "missing_sku"
+            ? `<p class="hint">This Etsy line item has no SKU set at all — set one on the Etsy listing itself, then this resolves automatically.</p>`
+            : "";
+      return `<tr>
+        <td>${escapeHtml(line.title)}</td>
+        <td>${line.sku ? `<code>${escapeHtml(line.sku)}</code>` : `<span class="hint">none</span>`}</td>
+        <td>${line.quantity}</td>
+        <td>${statusCell}${linkForm}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const historicalErrorNote =
+    item.allResolved && item.storedErrorDetail && item.storedReason !== "unmatched_sku"
+      ? `<p class="hint">Last attempt failed: ${escapeHtml(item.storedErrorDetail)}</p>`
+      : "";
+
+  const readyBanner = item.allResolved
+    ? `<p class="banner success">All line items now match a Shopify variant — ready to sync.</p>`
+    : `<p class="banner error">${item.lines.filter((l) => !l.resolved).length} line item(s) still need fixing before this can sync.</p>`;
+
+  return `<div class="review-item">
+    ${header}
+    <table>
+      <tr><th>Item</th><th>Etsy SKU</th><th>Qty</th><th>Status</th></tr>
+      ${linesRows}
+    </table>
+    ${readyBanner}
+    ${historicalErrorNote}
+    <form method="POST" action="/orders-needing-review/retry">
+      <input type="hidden" name="receiptId" value="${escapeHtml(item.etsyReceiptId)}">
+      <button type="submit">Sync now</button>
+    </form>
+  </div>`;
+}
+
+async function reviewOrdersPageHtml(params: {
+  message?: string;
+  messageIsError?: boolean;
+}): Promise<{ html: string; headers?: Record<string, string> }> {
+  const banner = params.message
+    ? `<p class="banner ${params.messageIsError ? "error" : "success"}">${escapeHtml(params.message)}</p>`
+    : "";
+
+  let items: ReviewOrderItem[] = [];
+  let shopifySkus: Awaited<ReturnType<typeof listShopifySkus>> = [];
+  let loadError: string | undefined;
+  try {
+    const shopId = getShopId();
+    [items, shopifySkus] = await Promise.all([buildReviewOrderItems(shopId), listShopifySkus()]);
+  } catch (error) {
+    loadError = error instanceof Error ? error.message : "Could not load flagged orders.";
+  }
+
+  if (loadError) {
+    const bodyHtml = `<h1>Orders needing review</h1>${banner}<p class="banner error">${escapeHtml(loadError)}</p>`;
+    return renderPage({ title: "Orders needing review", bodyHtml });
+  }
+
+  const shopifySkuOptionsHtml = shopifySkus
+    .map((s) => `<option value="${escapeHtml(s.sku)}">${escapeHtml(s.displayName)}</option>`)
+    .join("");
+
+  const itemsHtml = items.map(renderReviewItem).join("");
+
+  const bodyHtml = `
+  <h1>Orders needing review (${items.length})</h1>
+  <p>Etsy orders that couldn't be synced to Shopify automatically. Fix what's shown below for
+  each one, then click "Sync now" — no need to wait for the next automatic sync tick. Reloading
+  this page always re-checks against Shopify's current data, so a SKU you just linked shows up
+  as matched immediately.</p>
+
+  ${banner}
+
+  ${items.length > 0 ? itemsHtml : `<p>Nothing needs review — every Etsy order is synced.</p>`}
+  <datalist id="review-shopify-sku-options">${shopifySkuOptionsHtml}</datalist>`;
+
+  return renderPage({ title: "Orders needing review", bodyHtml });
+}
+
+function handleReviewOrdersGet(res: ServerResponse): Promise<void> {
+  return reviewOrdersPageHtml({}).then(({ html, headers }) => sendHtml(res, 200, html, headers));
+}
+
+async function handleReviewOrdersLinkPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const etsySku = params.get("etsySku")?.trim();
+  const shopifySku = params.get("shopifySku")?.trim();
+
+  if (!etsySku || !shopifySku) {
+    const { html, headers } = await reviewOrdersPageHtml({
+      message: "Both an Etsy SKU and a Shopify SKU are required.",
+      messageIsError: true,
+    });
+    sendHtml(res, 400, html, headers);
+    return;
+  }
+
+  const variant = await findVariantBySku(shopifySku);
+  if (!variant) {
+    const { html, headers } = await reviewOrdersPageHtml({
+      message: `No Shopify variant found with SKU "${shopifySku}" — not saved.`,
+      messageIsError: true,
+    });
+    sendHtml(res, 200, html, headers);
+    return;
+  }
+
+  setSkuLink(etsySku, shopifySku);
+  logger.info("SKU link saved via /orders-needing-review", { etsySku, shopifySku });
+  const { html, headers } = await reviewOrdersPageHtml({
+    message: `Linked Etsy SKU "${etsySku}" to Shopify SKU "${shopifySku}". Click "Sync now" below once every line item shows Matched.`,
+  });
+  sendHtml(res, 200, html, headers);
+}
+
+async function handleReviewOrdersRetryPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readRequestBody(req);
+  const params = new URLSearchParams(body);
+  const receiptId = params.get("receiptId");
+  if (!receiptId) {
+    sendHtml(res, 400, "<h1>Missing receipt id</h1>");
+    return;
+  }
+
+  try {
+    const shopId = getShopId();
+    const receipt = await getReceiptById(shopId, receiptId);
+    const currencyCode = await getShopCurrencyCode();
+    const result = await syncOneReceipt(receipt, currencyCode);
+
+    let message: string;
+    let messageIsError = false;
+    switch (result.outcome) {
+      case "synced":
+        message = `Synced! Created Shopify order ${result.shopifyOrderName}.`;
+        break;
+      case "unmatched_sku":
+        flagUnmatchedSkus(receipt.receipt_id, receipt.created_timestamp, result.unresolved);
+        message = `Still has ${result.unresolved.length} unmatched line item(s) — link them below, then try again.`;
+        messageIsError = true;
+        break;
+      case "shopify_order_error":
+        flagError(receipt.receipt_id, receipt.created_timestamp, "shopify_order_error", result.errorDetail);
+        message = `Shopify rejected the order: ${JSON.stringify(result.errorDetail)}`;
+        messageIsError = true;
+        break;
+      case "unexpected_error":
+        flagError(receipt.receipt_id, receipt.created_timestamp, "unexpected_error", result.errorDetail);
+        message = `Failed: ${result.errorDetail instanceof Error ? result.errorDetail.message : String(result.errorDetail)}`;
+        messageIsError = true;
+        break;
+    }
+    logger.info("Manually retried Etsy receipt via /orders-needing-review", { receiptId, outcome: result.outcome });
+
+    const { html, headers } = await reviewOrdersPageHtml({ message, messageIsError });
+    sendHtml(res, 200, html, headers);
+  } catch (error) {
+    const { html, headers } = await reviewOrdersPageHtml({
+      message: error instanceof Error ? error.message : "Failed to retry this receipt.",
+      messageIsError: true,
+    });
+    sendHtml(res, 200, html, headers);
+  }
+}
+
 interface SetupField {
   key: OverridableKey;
   label: string;
@@ -2045,6 +2336,9 @@ export function startServer(): void {
         if (url.pathname === "/sync-skus-to-etsy/link" && req.method === "POST") return handleSyncSkusLinkPost(req, res);
         if (url.pathname === "/sync-skus-to-etsy/push" && req.method === "POST") return handleSyncSkusPushPost(req, res);
         if (url.pathname === "/sync-skus-to-etsy") return handleSyncSkusGet(res);
+        if (url.pathname === "/orders-needing-review/link" && req.method === "POST") return handleReviewOrdersLinkPost(req, res);
+        if (url.pathname === "/orders-needing-review/retry" && req.method === "POST") return handleReviewOrdersRetryPost(req, res);
+        if (url.pathname === "/orders-needing-review") return handleReviewOrdersGet(res);
         if (url.pathname === "/log") return handleLogPage(res);
         if (url.pathname === "/") return handleStatusPage(res);
         res.writeHead(404).end("Not found");
