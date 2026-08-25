@@ -341,17 +341,26 @@ export async function getListingInventory(
 
 /**
  * Pushes new SKUs onto specific inventory products of an *existing* listing, keyed by Etsy's
- * own product_id, preserving every other field (property values, offerings, price, quantity,
- * and which property each of those is allowed to vary by) exactly as Etsy currently has them.
- * Products not present in `skuByProductId` keep their current SKU untouched. Used to re-sync
- * SKUs after they've changed in Shopify, as opposed to setListingSku which only ever runs
- * once, right after a brand-new draft is created.
+ * own product_id, preserving every other field (property values, offerings, price, and quantity)
+ * exactly as Etsy currently has them. Products not present in `skuByProductId` keep their
+ * current SKU untouched. Used to re-sync SKUs after they've changed in Shopify, as opposed to
+ * setListingSku which only ever runs once, right after a brand-new draft is created.
  */
 export async function updateListingSkus(listingId: number, skuByProductId: Map<number, string>): Promise<void> {
-  const { products, priceOnProperty, quantityOnProperty, skuOnProperty } = await getListingInventorySnapshot(
-    listingId,
-    { forceRefresh: true }
+  const { products, priceOnProperty, quantityOnProperty } = await getListingInventorySnapshot(listingId, {
+    forceRefresh: true,
+  });
+
+  // sku_on_property is declared fresh rather than echoed back from the listing's existing
+  // config: that config may never have allowed SKU to vary at all (e.g. every product still
+  // shared the same blank SKU before now), which is exactly the "sku must be consistent"
+  // rejection this is fixing. Every property the listing has is declared, since each Shopify
+  // variant independently carries its own SKU regardless of which property changed between
+  // variants — mirrors the same fix already applied in setListingVariations.
+  const mappedPropertyIds = Array.from(
+    new Set(products.flatMap((p) => p.propertyValues.map((pv) => pv.propertyId)))
   );
+
   const putBody = {
     products: products.map((p) => ({
       sku: skuByProductId.get(p.productId) ?? p.sku ?? undefined,
@@ -370,7 +379,7 @@ export async function updateListingSkus(listingId: number, skuByProductId: Map<n
     })),
     price_on_property: priceOnProperty,
     quantity_on_property: quantityOnProperty,
-    sku_on_property: skuOnProperty,
+    sku_on_property: mappedPropertyIds,
   };
 
   const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
