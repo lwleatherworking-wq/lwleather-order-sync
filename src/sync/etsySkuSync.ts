@@ -80,6 +80,19 @@ function looseKey(raw: string): string {
   return (raw.split(/[\d(]/)[0] ?? "").replace(/[-\s]+$/, "").trim().toLowerCase();
 }
 
+/**
+ * Reduces a bare measurement to its number — e.g. Etsy's `7` and Shopify's `7 Inch`, `7.0 Inch`
+ * or `7 Inches` all become "7". Only applies when the whole value is a number with an optional
+ * inch unit; anything else (a size word, a range, a cm value) returns "", which valueSetsMatch
+ * treats as never matching, so this pass can't pair values that aren't the same length.
+ */
+function measurementKey(raw: string): string {
+  const m = raw.trim().match(/^(\d+(?:\.\d+)?)\s*(?:"|”|in|ins|inch|inches)?\.?$/i);
+  return m ? String(parseFloat(m[1]!)) : "";
+}
+
+const MATCH_KEYS = [exactKey, looseKey, measurementKey];
+
 function inventoryValueSet(inv: ListingInventoryProduct, keyFn: (raw: string) => string): string[] {
   return inv.propertyValues.flatMap((pv) => pv.values.map(keyFn));
 }
@@ -124,12 +137,13 @@ function matchByKey(
 /**
  * Finds the single Shopify variant whose selected-option values match `values` (an arbitrary
  * list of variation text, e.g. from an Etsy order's line-item variations), trying an exact
- * text match first and falling back to the coarser label match (see `looseKey`). Returns null
+ * text match first and falling back to the coarser label match (see `looseKey`), then a bare
+ * measurement match (see `measurementKey`). Returns null
  * if no variant matches or more than one does — used to suggest, never silently assume, a
  * match for an order with no SKU to go on at all.
  */
 export function findMatchingVariant(values: string[], variants: ProductVariant[]): ProductVariant | null {
-  for (const keyFn of [exactKey, looseKey]) {
+  for (const keyFn of MATCH_KEYS) {
     const targetKeys = values.map(keyFn);
     const matches = variants.filter((v) => valueSetsMatch(targetKeys, variantValueSet(v, keyFn)));
     if (matches.length === 1) return matches[0]!;
@@ -142,7 +156,8 @@ export function findMatchingVariant(values: string[], variants: ProductVariant[]
  * with no variations) to the Shopify variant it corresponds to. Matches by variation property
  * values rather than SKU, since the SKU is exactly what's being changed and so can't be used to
  * find its own match. Tries an exact text match first, then falls back to a coarser label match
- * for when the two platforms word the same size/color differently (see `looseKey`) — either way,
+ * for when the two platforms word the same size/color differently (see `looseKey`), then a bare
+ * measurement match for lengths like `7` vs `7 Inch` (see `measurementKey`) — either way,
  * only ever returns a mapping when it's an unambiguous 1:1 bijection; anything less certain
  * returns null so callers never guess.
  */
@@ -155,7 +170,11 @@ function matchInventoryToVariants(
   }
   if (inventory.length !== variants.length) return null;
 
-  return matchByKey(inventory, variants, exactKey) ?? matchByKey(inventory, variants, looseKey);
+  for (const keyFn of MATCH_KEYS) {
+    const mapping = matchByKey(inventory, variants, keyFn);
+    if (mapping) return mapping;
+  }
+  return null;
 }
 
 function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, ProductVariant>): SkuDiff[] {
