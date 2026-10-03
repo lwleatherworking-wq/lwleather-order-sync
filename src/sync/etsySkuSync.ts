@@ -91,7 +91,52 @@ function measurementKey(raw: string): string {
   return m ? String(parseFloat(m[1]!)) : "";
 }
 
-const MATCH_KEYS = [exactKey, looseKey, measurementKey];
+/**
+ * The first word of a value — e.g. Etsy's `Single` and Shopify's `Single Pen Holder` both become
+ * "single". Returns "" for values that don't start with a letter. Coarse on its own, but
+ * matchByKey only accepts it when every value pairs up 1:1, so two variants sharing a first word
+ * (e.g. "Small Black" and "Small Brown") make the whole pass fail rather than guess.
+ */
+function leadingWordKey(raw: string): string {
+  const m = raw.trim().match(/^[a-z]+/i);
+  return m ? m[0].toLowerCase() : "";
+}
+
+const MATCH_KEYS = [exactKey, looseKey, measurementKey, leadingWordKey];
+
+/**
+ * When every variation but one matches exactly, pairs the single leftover Etsy variation with
+ * the single leftover Shopify variant — e.g. Etsy "Full Set" vs Shopify "Set of four" once the
+ * other four coaster designs have matched by name. Only used on listings with at least three
+ * variations, so at least two exact matches confirm both sides describe the same product.
+ */
+function matchWithOneLeftover(
+  inventory: ListingInventoryProduct[],
+  variants: ProductVariant[]
+): Map<number, ProductVariant> | null {
+  if (inventory.length < 3 || inventory.length !== variants.length) return null;
+  const result = new Map<number, ProductVariant>();
+  const usedVariantIndexes = new Set<number>();
+  const leftovers: ListingInventoryProduct[] = [];
+  for (const inv of inventory) {
+    const invValues = inventoryValueSet(inv, exactKey);
+    const candidates = variants
+      .map((v, i) => ({ v, i }))
+      .filter(({ v, i }) => !usedVariantIndexes.has(i) && valueSetsMatch(invValues, variantValueSet(v, exactKey)));
+    if (candidates.length > 1) return null;
+    if (candidates.length === 0) {
+      leftovers.push(inv);
+      continue;
+    }
+    result.set(inv.productId, candidates[0]!.v);
+    usedVariantIndexes.add(candidates[0]!.i);
+  }
+  if (leftovers.length !== 1) return null;
+  const remaining = variants.filter((_, i) => !usedVariantIndexes.has(i));
+  if (remaining.length !== 1) return null;
+  result.set(leftovers[0]!.productId, remaining[0]!);
+  return result;
+}
 
 function inventoryValueSet(inv: ListingInventoryProduct, keyFn: (raw: string) => string): string[] {
   return inv.propertyValues.flatMap((pv) => pv.values.map(keyFn));
@@ -157,11 +202,12 @@ export function findMatchingVariant(values: string[], variants: ProductVariant[]
  * values rather than SKU, since the SKU is exactly what's being changed and so can't be used to
  * find its own match. Tries an exact text match first, then falls back to a coarser label match
  * for when the two platforms word the same size/color differently (see `looseKey`), then a bare
- * measurement match for lengths like `7` vs `7 Inch` (see `measurementKey`) — either way,
+ * measurement match for lengths like `7` vs `7 Inch` (see `measurementKey`), a first-word match
+ * (see `leadingWordKey`), and finally a single forced leftover pair (see `matchWithOneLeftover`) — either way,
  * only ever returns a mapping when it's an unambiguous 1:1 bijection; anything less certain
  * returns null so callers never guess.
  */
-function matchInventoryToVariants(
+export function matchInventoryToVariants(
   inventory: ListingInventoryProduct[],
   variants: ProductVariant[]
 ): Map<number, ProductVariant> | null {
@@ -174,7 +220,7 @@ function matchInventoryToVariants(
     const mapping = matchByKey(inventory, variants, keyFn);
     if (mapping) return mapping;
   }
-  return null;
+  return matchWithOneLeftover(inventory, variants);
 }
 
 function buildDiffs(inventory: ListingInventoryProduct[], mapping: Map<number, ProductVariant>): SkuDiff[] {
