@@ -235,7 +235,14 @@ export async function setListingSku(listingId: number, sku: string): Promise<voi
 export interface ListingInventoryProduct {
   productId: number;
   sku: string | null;
-  propertyValues: Array<{ propertyId: number; propertyName: string; valueIds: number[]; values: string[] }>;
+  propertyValues: Array<{
+    propertyId: number;
+    propertyName: string;
+    // Unit scale for measured properties (e.g. Length in inches); null when the property has none.
+    scaleId: number | null;
+    valueIds: number[];
+    values: string[];
+  }>;
   offerings: Array<{ quantity: number; isEnabled: boolean; price: number; readinessStateId: number | null }>;
 }
 
@@ -244,7 +251,13 @@ interface RawListingInventoryResponse {
     product_id: number;
     sku: string | null;
     is_deleted: boolean;
-    property_values: Array<{ property_id: number; property_name: string; value_ids: number[]; values: string[] }>;
+    property_values: Array<{
+      property_id: number;
+      property_name: string;
+      scale_id: number | null;
+      value_ids: number[];
+      values: string[];
+    }>;
     offerings: Array<{
       quantity: number;
       is_enabled: boolean;
@@ -290,6 +303,7 @@ async function fetchListingInventorySnapshot(listingId: number): Promise<Invento
       propertyValues: p.property_values.map((pv) => ({
         propertyId: pv.property_id,
         propertyName: pv.property_name,
+        scaleId: pv.scale_id ?? null,
         valueIds: pv.value_ids,
         values: pv.values,
       })),
@@ -364,9 +378,12 @@ export async function updateListingSkus(listingId: number, skuByProductId: Map<n
   const putBody = {
     products: products.map((p) => ({
       sku: skuByProductId.get(p.productId) ?? p.sku ?? undefined,
+      // scale_id must be echoed back for measured properties (e.g. Length in inches), or Etsy
+      // rejects the whole PUT with "Property … with scales has invalid ott_value_qualifier 0".
       property_values: p.propertyValues.map((pv) => ({
         property_id: pv.propertyId,
         property_name: pv.propertyName,
+        ...(pv.scaleId !== null ? { scale_id: pv.scaleId } : {}),
         value_ids: pv.valueIds,
         values: pv.values,
       })),
